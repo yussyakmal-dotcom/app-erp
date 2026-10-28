@@ -64,6 +64,20 @@ dan `DEMO_DATA=false`, atau nonaktifkan akun demo dari menu Pengguna & peran.
   Lihat: `docker compose exec app tail -f /var/log/inventory/audit_log.jsonl`
 - API docs: `http://IP-SERVER:8000/api/docs`
 
+## Tanggal dan nomor transaksi
+
+Setiap transaksi baru menyimpan tanggal transaksi tersendiri dan memperoleh nomor otomatis. Counter diulang per tanggal mulai dari `10001`:
+
+| Transaksi | Format | Contoh 29 Oktober 2026 |
+|---|---|---|
+| Purchase order | `POyymmdd+counter` | `PO26102910001` |
+| Transfer antar gudang | `TRyymmdd+counter` | `TR26102910001` |
+| Scrap/barang susut | `BSyymmdd+counter` | `BS26102910001` |
+| Penerimaan barang | `RCVyymmdd+counter` | `RCV26102910001` |
+| Stock opname | `SOyymmdd+counter` | `SO26102910001` |
+
+Nomor transaksi lama tetap dipertahankan agar referensi histori, kartu stok, dan audit log tidak berubah.
+
 ## Reset total
 
 ```bash
@@ -101,3 +115,4 @@ Ikon disematkan langsung di aplikasi (SVG), jadi tetap tampil tanpa akses intern
 - Aturan bisnis (FIFO, reservasi TTL, hak akses per peran) dijalankan di browser. Server memverifikasi login,
   mencatat siapa yang menyimpan, dan menulis audit log dengan identitas dari sesi. Untuk produksi skala besar,
   langkah berikutnya adalah memindahkan aturan ini ke endpoint server dan tabel ternormalisasi.
+

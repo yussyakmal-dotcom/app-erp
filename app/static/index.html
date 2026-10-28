@@ -286,7 +286,7 @@ nav a[aria-current]{background:var(--nav-cur);color:var(--nav-cur-ink)}
 <script>
 'use strict';
 /* ================= CORE ================= */
-const APP_VERSION = 'v2.2';
+const APP_VERSION = 'v2.3';
 const DAY = 864e5, HOUR = 36e5, KEY = 'inventori-mvp-v1';
 let S = null;
 class UserError extends Error {}
@@ -310,6 +310,27 @@ function load() { try { const r = localStorage.getItem(KEY); if (r) { S = JSON.p
 function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { } }
 function nid(k) { S.seq[k] = (S.seq[k] || 0) + 1; return S.seq[k]; }
 function docNo(p) { const n = nid('doc_' + p); const d = new Date(); return `${p}-${String(d.getFullYear()).slice(2)}${String(d.getMonth() + 1).padStart(2, '0')}-${String(n).padStart(4, '0')}`; }
+function validTransactionDate(value) {
+  const date = String(value || '').trim();
+  const ts = parseDate(date);
+  if (!ts || isoDate(ts) !== date) fail('Tanggal transaksi wajib diisi dengan tanggal yang valid.');
+  return date;
+}
+function transactionDateOf(o, fallback = 'createdAt') {
+  return o?.transactionDate || isoDate(o?.[fallback] || Date.now());
+}
+function transactionNo(prefix, dateValue) {
+  const date = validTransactionDate(dateValue || isoDate(Date.now()));
+  const yymmdd = date.slice(2).replace(/-/g, '');
+  const key = `transaction_${prefix}_${yymmdd}`;
+  const re = new RegExp(`^${prefix}${yymmdd}(\\d{5,})$`);
+  const lists = [S.pos, S.transfers, S.scraps, S.inbounds, S.opnames].filter(Array.isArray);
+  let max = Math.max(10000, +(S.seq[key] || 0));
+  lists.forEach(list => list.forEach(o => { const m = re.exec(String(o.no || '')); if (m) max = Math.max(max, +m[1]); }));
+  const counter = max + 1;
+  S.seq[key] = counter;
+  return `${prefix}${yymmdd}${counter}`;
+}
 
 const byId = (arr, id) => arr.find(x => x.id === +id);
 const W = id => byId(S.warehouses, id), P = id => byId(S.products, id), C = id => byId(S.categories, id), SU = id => byId(S.suppliers, id), U = id => byId(S.users, id), BR = id => byId(S.brands, id), TY = id => byId(S.types, id), RK = id => byId(S.racks || [], id);
@@ -443,7 +464,7 @@ function sweep() {
 /* ================= SEED ================= */
 function seed() {
   const now = Date.now(), t0 = today0();
-  S = { v: 2, seq: {}, brands: [], types: [], settings: { expiryDays: 14, safetyDays: 3, coverDays: 14, forecastWindow: 30, priceTolerance: 15, company: 'KotakRasa' },
+  S = { v: 3, seq: {}, brands: [], types: [], settings: { expiryDays: 14, safetyDays: 3, coverDays: 14, forecastWindow: 30, priceTolerance: 15, company: 'KotakRasa' },
     currentUserId: 1, users: [], warehouses: [], racks: [], categories: [], products: [], suppliers: [], batches: [], reservations: [], transfers: [], scraps: [], movements: [], pos: [], inbounds: [], usages: [], leadHistory: [], opnames: [], audit: [], kitchens: [], boms: [], productions: [], ui: { page: 'dashboard' } };
   const add = (k, o) => { o.id = nid(k); S[k].push(o); return o; };
   [['GDC', 'Gudang Central', true, true], ['CBG-UTR', 'Cabang Utara', false, true], ['CBG-SEL', 'Cabang Selatan', false, true], ['CBG-LMA', 'Cabang Lama (tutup)', false, false],
@@ -578,7 +599,8 @@ function seed() {
   }
   // Riwayat PO (sumber lead time dinamis)
   const mkPO = (sid, ago, lt, lines, status) => {
-    const po = add('pos', { no: docNo('PO'), supplierId: sid, status, createdAt: now - (ago + 1) * DAY, orderedAt: status === 'draft' ? null : now - ago * DAY, closedAt: status === 'selesai' ? now - (ago - lt) * DAY : null, createdBy: 'dimas', note: '', printCount: 0, shortClosed: false,
+    const createdAt = now - (ago + 1) * DAY, transactionDate = isoDate(createdAt);
+    const po = add('pos', { no: transactionNo('PO', transactionDate), transactionDate, supplierId: sid, status, createdAt, orderedAt: status === 'draft' ? null : now - ago * DAY, closedAt: status === 'selesai' ? now - (ago - lt) * DAY : null, createdBy: 'dimas', note: '', printCount: 0, shortClosed: false,
       lines: lines.map(([pid, qty, pm]) => { const p = P(pid); const f = uomF(p, p.poUom); return { productId: pid, uom: p.poUom, factor: f, qty, price: Math.round(p.refPrice * f * (pm || 1)), disc: 0, receivedBase: status === 'selesai' ? qty * f : 0 }; }) });
     if (status === 'selesai') po.lines.forEach(l => S.leadHistory.push({ supplierId: sid, productId: l.productId, days: lt, ts: po.closedAt, poNo: po.no }));
     return po;
@@ -589,7 +611,8 @@ function seed() {
   mkPO(2, 1, 0, [[3, 4], [4, 2]], 'dipesan'); mkPO(3, 0, 0, [[7, 2]], 'draft');
   // Transfer: satu dalam perjalanan, satu draft (stok di-reserve)
   const mkTr = (src, dst, items, status, agoH) => {
-    const t = add('transfers', { no: docNo('TRF'), srcId: src, dstId: dst, status, createdAt: now - agoH * HOUR, createdBy: 'budi', expiresAt: null, ttlHours: null, shippedAt: null, receivedAt: null, printCount: 0, fifoOverride: false, note: '', lines: [] });
+    const createdAt = now - agoH * HOUR, transactionDate = isoDate(createdAt);
+    const t = add('transfers', { no: transactionNo('TR', transactionDate), transactionDate, srcId: src, dstId: dst, status, createdAt, createdBy: 'budi', expiresAt: null, ttlHours: null, shippedAt: null, receivedAt: null, printCount: 0, fifoOverride: false, note: '', lines: [] });
     let ttl = Infinity;
     for (const [pid, qty] of items) {
       const p = P(pid); ttl = Math.min(ttl, ttlOf(p)); const plan = fifoPlan(pid, src, qty);
@@ -606,7 +629,8 @@ function seed() {
   mkTr(1, 2, [[1, 25], [2, 10], [8, 12]], 'dikirim', 20);
   mkTr(1, 3, [[6, 10], [3, 6]], 'draft', 5);
   const kb = S.batches.find(b => b.batchNo === 'KJU-0901');
-  add('scraps', { no: docNo('SCR'), warehouseId: 1, status: 'draft', source: 'manual', reason: 'Kedaluwarsa', deductOnApprove: true, ref: '', createdAt: now - 2 * HOUR, createdBy: 'budi', approvedBy: null, approvedAt: null, lines: [{ productId: 5, batchId: kb.id, batchNo: kb.batchNo, qty: 2, cost: kb.cost }] });
+  const scrapCreatedAt = now - 2 * HOUR, scrapTransactionDate = isoDate(scrapCreatedAt);
+  add('scraps', { no: transactionNo('BS', scrapTransactionDate), transactionDate: scrapTransactionDate, warehouseId: 1, status: 'draft', source: 'manual', reason: 'Kedaluwarsa', deductOnApprove: true, ref: '', createdAt: scrapCreatedAt, createdBy: 'budi', approvedBy: null, approvedAt: null, lines: [{ productId: 5, batchId: kb.id, batchNo: kb.batchNo, qty: 2, cost: kb.cost }] });
   audit('SEED_DATA', '/api/v1/seed', null, { note: 'Data demo dibuat', warehouses: S.warehouses.length, products: S.products.length }, 'system');
   save();
 }
@@ -614,6 +638,7 @@ function seed() {
 /* ================= TRANSFER ================= */
 function createTransfer(d) {
   need('transfer');
+  const transactionDate = validTransactionDate(d.transactionDate);
   const src = W(d.srcId), dst = W(d.dstId);
   if (!src || !src.isActive) fail('Pilih gudang asal yang aktif.');
   if (!dst || !dst.isActive) fail('Pilih gudang tujuan yang aktif.');
@@ -643,7 +668,7 @@ function createTransfer(d) {
   }
   if (override && !d.confirmOverride) return { needConfirm: true };
   const now = Date.now();
-  const t = { id: nid('transfers'), no: docNo('TRF'), srcId: src.id, dstId: dst.id, status: 'draft', createdAt: now, createdBy: cur().username, expiresAt: now + ttl * HOUR, ttlHours: ttl, shippedAt: null, receivedAt: null, printCount: 0, fifoOverride: override, note: d.note || '', lines: out };
+  const t = { id: nid('transfers'), no: transactionNo('TR', transactionDate), transactionDate, srcId: src.id, dstId: dst.id, status: 'draft', createdAt: now, createdBy: cur().username, expiresAt: now + ttl * HOUR, ttlHours: ttl, shippedAt: null, receivedAt: null, printCount: 0, fifoOverride: override, note: d.note || '', lines: out };
   S.transfers.push(t);
   out.forEach(l => l.picks.forEach(pk => S.reservations.push({ id: nid('reservations'), transferId: t.id, batchId: pk.batchId, qty: pk.qty, expiresAt: t.expiresAt })));
   audit('CREATE_DRAFT_TRANSFER', '/api/v1/transfer/draft', null, t);
@@ -989,17 +1014,18 @@ function completeProduction(d) {
 /* ================= SCRAP ================= */
 const scrapVal = s => s.lines.reduce((a, l) => a + l.qty * l.cost, 0);
 function createScrapRaw(o) {
-  const s = { id: nid('scraps'), no: docNo('SCR'), status: 'draft', createdAt: Date.now(), createdBy: cur().username, approvedBy: null, approvedAt: null, ref: '', ...o };
+  const transactionDate = validTransactionDate(o.transactionDate || isoDate(Date.now()));
+  const s = { id: nid('scraps'), status: 'draft', createdAt: Date.now(), createdBy: cur().username, approvedBy: null, approvedAt: null, ref: '', ...o, no: transactionNo('BS', transactionDate), transactionDate };
   S.scraps.push(s); audit('CREATE_DRAFT_SCRAP', '/api/v1/scrap/draft', null, s); return s;
 }
-function createManualScrap({ warehouseId, batchId, qty, reason }) {
+function createManualScrap({ warehouseId, batchId, qty, reason, transactionDate }) {
   need('scrap.create');
   if (!myWhIds().includes(+warehouseId)) fail('Anda hanya bisa mengajukan scrap di gudang tugas Anda.');
   const b = byId(S.batches, batchId); if (!b || b.warehouseId !== +warehouseId) fail('Pilih batch yang akan di-scrap.');
   const q = r4(qty); if (!(q > 0)) fail('Jumlah scrap harus lebih dari 0.');
   if (q > avail(b) + 1e-9) fail(`Batch ${b.batchNo} hanya tersedia ${num(avail(b))}.`);
   if (!reason) fail('Pilih alasan scrap.');
-  return createScrapRaw({ warehouseId: +warehouseId, source: 'manual', reason, deductOnApprove: true, lines: [{ productId: b.productId, batchId: b.id, batchNo: b.batchNo, qty: q, cost: b.cost }] });
+  return createScrapRaw({ warehouseId: +warehouseId, source: 'manual', reason, transactionDate, deductOnApprove: true, lines: [{ productId: b.productId, batchId: b.id, batchNo: b.batchNo, qty: q, cost: b.cost }] });
 }
 function approveScrap(id) {
   need('scrap.approve'); const s = byId(S.scraps, id); if (s.status !== 'draft') fail('Scrap ini sudah diproses.');
@@ -1034,6 +1060,7 @@ function recordUsage({ warehouseId, productId, uom, uomQty, note }) {
 /* ================= INBOUND ================= */
 function inboundCheck(d) {
   const errors = [], warnings = []; const c = central();
+  if (!parseDate(String(d.transactionDate || '').trim())) errors.push('Tanggal transaksi wajib diisi.');
   if (!c) errors.push('Belum ada Gudang Central aktif. Penerimaan wajib melalui Gudang Central.');
   else if (!myWhIds().includes(c.id)) errors.push('Penerimaan barang hanya dilakukan staf Gudang Central.');
   if (!d.supplierId || !SU(d.supplierId)?.isActive) errors.push('Pilih supplier.');
@@ -1063,8 +1090,9 @@ function inboundCheck(d) {
 }
 function doInbound(d) {
   need('inbound'); const { errors, lines } = inboundCheck(d); if (errors.length) fail(errors[0]);
-  const c = central(); const no = docNo('GRN');
-  const rec = { id: nid('inbounds'), no, supplierId: +d.supplierId, poId: d.poId ? +d.poId : null, docRef: d.docRef || '', ts: Date.now(), user: cur().username, lines: [] };
+  const transactionDate = validTransactionDate(d.transactionDate);
+  const c = central(); const no = transactionNo('RCV', transactionDate);
+  const rec = { id: nid('inbounds'), no, transactionDate, supplierId: +d.supplierId, poId: d.poId ? +d.poId : null, docRef: d.docRef || '', ts: Date.now(), user: cur().username, lines: [] };
   for (const l of lines) {
     const p = P(l.productId); const f = uomF(p, l.uom); const qb = r4(+l.qty * f); const cb = r4(+l.cost / f);
     const b = { id: nid('batches'), productId: p.id, warehouseId: c.id, batchNo: String(l.batchNo).trim(), expDate: parseDate(l.exp), qty: qb, cost: cb, rack: String(l.rack || '').trim().toUpperCase(), inboundAt: Date.now(), createdAt: Date.now() };
@@ -1106,7 +1134,8 @@ function savePO(d) {
     const before = clone(po); Object.assign(po, { supplierId: sup.id, note: d.note || '', lines: out });
     audit('UPDATE_PO', `/api/v1/po/${po.no}`, before, po); return po;
   }
-  const po = { id: nid('pos'), no: docNo('PO'), supplierId: sup.id, status: 'draft', createdAt: Date.now(), orderedAt: null, closedAt: null, createdBy: cur().username, note: d.note || '', printCount: 0, shortClosed: false, lines: out };
+  const transactionDate = validTransactionDate(d.transactionDate || isoDate(Date.now()));
+  const po = { id: nid('pos'), no: transactionNo('PO', transactionDate), transactionDate, supplierId: sup.id, status: 'draft', createdAt: Date.now(), orderedAt: null, closedAt: null, createdBy: cur().username, note: d.note || '', printCount: 0, shortClosed: false, lines: out };
   S.pos.push(po); audit('CREATE_PO', '/api/v1/po', null, po); return po;
 }
 function orderPO(id) { need('po'); const po = byId(S.pos, id); if (po.status !== 'draft') fail('Hanya draft yang bisa dikirim.'); const b = clone(po); po.status = 'dipesan'; po.orderedAt = Date.now(); audit('ORDER_PO', `/api/v1/po/${po.no}/order`, b, po); }
@@ -1144,15 +1173,16 @@ function posFromForecast(pids, win) {
 }
 
 /* ================= STOCK OPNAME (BLIND COUNT) ================= */
-function createOpname({ warehouseId, rack }) {
+function createOpname({ warehouseId, rack, transactionDate }) {
   need('opname.count'); const w = W(warehouseId); if (!w || !w.isActive) fail('Pilih gudang.');
+  transactionDate = validTransactionDate(transactionDate);
   if (!myWhIds().includes(w.id)) fail('Anda hanya bisa membuka sesi di gudang tugas Anda.');
   if (S.opnames.some(o => o.warehouseId === w.id && o.status !== 'diposting' && o.status !== 'batal' && (!o.rack || !rack || o.rack === rack))) fail('Masih ada sesi opname terbuka untuk lokasi ini. Selesaikan dulu.');
   const lines = S.batches.filter(b => b.warehouseId === w.id && b.qty > 1e-9 && (!rack || (b.rack || '-') === rack))
     .sort((a, b) => (a.rack || '').localeCompare(b.rack || '') || P(a.productId).name.localeCompare(P(b.productId).name) || fifoSort(a, b))
     .map((b, i) => ({ key: 'L' + String(i + 1).padStart(3, '0'), batchId: b.id, productId: b.productId, batchNo: b.batchNo, rack: b.rack || '-', systemQty: b.qty, counted: null }));
   if (!lines.length) fail('Tidak ada stok untuk dihitung di lokasi ini.');
-  const o = { id: nid('opnames'), no: docNo('OPN'), warehouseId: w.id, rack: rack || '', token: randToken(), status: 'menghitung', createdAt: Date.now(), createdBy: cur().username, lines, uploads: 0 };
+  const o = { id: nid('opnames'), no: transactionNo('SO', transactionDate), transactionDate, warehouseId: w.id, rack: rack || '', token: randToken(), status: 'menghitung', createdAt: Date.now(), createdBy: cur().username, lines, uploads: 0 };
   S.opnames.unshift(o); audit('CREATE_OPNAME_SESSION', '/api/v1/opname', null, { ...o, lines: o.lines.map(l => ({ key: l.key, batchNo: l.batchNo })) }); return o;
 }
 function submitOpname(id) {
@@ -1411,6 +1441,16 @@ function migrate() {
     audit('MIGRATE_V2_CATEGORY_HIERARCHY', '/api/v1/migrate', null, { note: 'Kategori lama dipindah menjadi subkategori di bawah "Belum dikelompokkan". Semua produk diberi jenis Bahan baku.' }, 'system');
     ch = true;
   }
+  if ((S.v || 1) < 3) {
+    (S.pos || []).forEach(o => { if (!o.transactionDate) o.transactionDate = isoDate(o.createdAt || Date.now()); });
+    (S.transfers || []).forEach(o => { if (!o.transactionDate) o.transactionDate = isoDate(o.createdAt || Date.now()); });
+    (S.scraps || []).forEach(o => { if (!o.transactionDate) o.transactionDate = isoDate(o.createdAt || Date.now()); });
+    (S.inbounds || []).forEach(o => { if (!o.transactionDate) o.transactionDate = isoDate(o.ts || Date.now()); });
+    (S.opnames || []).forEach(o => { if (!o.transactionDate) o.transactionDate = isoDate(o.createdAt || Date.now()); });
+    S.v = 3;
+    audit('MIGRATE_V3_TRANSACTION_METADATA', '/api/v1/migrate', null, { note: 'Tanggal transaksi ditambahkan. Nomor lama dipertahankan agar referensi historis tidak berubah; transaksi baru memakai format nomor harian mulai 10001.' }, 'system');
+    ch = true;
+  }
   return ch;
 }
 
@@ -1524,7 +1564,7 @@ function resetForms() {
   const c = central();
   F = {
     stk: { wid: '', rack: '', q: '', mode: 'sum', group: '', c1: '', c2: '', c3: '', type: '', brand: '' },
-    inb: { poId: '', supplierId: '', docRef: '', lines: [blankInb()] }, inbErr: [],
+    inb: { transactionDate: isoDate(Date.now()), poId: '', supplierId: '', docRef: '', lines: [blankInb()] }, inbErr: [],
     trfTab: 'aktif', scrTab: 'draft', poTab: 'aktif', opnTab: 'aktif', mfgTab: 'aktif', mfgKitchen: '',
     use: { warehouseId: String(cur().warehouseId || c?.id || ''), productId: '', uom: '', uomQty: '', note: '' }, useLast: null,
     fcSel: null, fcf: { c1: '', c2: '', c3: '', type: '', brand: '' }, master: { q: '', inactive: false, c1: '', c2: '', c3: '', type: '', brand: '' },
@@ -2016,7 +2056,7 @@ H.inbProd = d => { const l = F.inb.lines[d.i]; const p = P(l.productId); if (p) 
 H.inbUom = d => { const l = F.inb.lines[d.i]; const p = P(l.productId); if (p && !F.inb.poId) l.cost = String(Math.round(p.refPrice * uomF(p, l.uom))); };
 A.inbAdd = () => { F.inb.lines.push(blankInb()); render(); };
 A.inbDel = d => { F.inb.lines.splice(+d.i, 1); render(); };
-A.inbReset = () => { F.inb = { poId: '', supplierId: '', docRef: '', lines: [blankInb()] }; F.inbErr = []; render(); };
+A.inbReset = () => { F.inb = { transactionDate: isoDate(Date.now()), poId: '', supplierId: '', docRef: '', lines: [blankInb()] }; F.inbErr = []; render(); };
 A.inbSubmit = () => {
   const r = inboundCheck(F.inb); F.inbErr = r.errors;
   if (r.errors.length) { render(); toast(r.errors[0], 'err'); return; }
@@ -2043,11 +2083,12 @@ V.inbound = () => {
       <td>${cRacks.length ? `<select aria-label="Rak" data-bind="inb.lines.${i}.rack">${opt('', '– Tanpa rak –', l.rack)}${cRacks.map(rk => opt(rk.code, `${rk.code}${rk.name ? ' (' + rk.name + ')' : ''}`, l.rack)).join('')}</select>` : `<input aria-label="Rak" data-bind="inb.lines.${i}.rack" value="${esc(l.rack)}" maxlength="20" placeholder="A-01">`}</td>
       <td>${d.lines.length > 1 ? `<button type="button" class="icon" data-act="inbDel" data-i="${i}" aria-label="Hapus baris ${i + 1}">×</button>` : ''}</td></tr>`;
   });
-  const hist = S.inbounds.slice(0, 20).map(r => `<tr><td class="mono"><a href="#" data-act="openInbound" data-id="${r.id}">${esc(r.no)}</a></td><td>${fdt(r.ts)}</td><td>${esc(SU(r.supplierId)?.name)}</td><td>${r.poId ? esc(byId(S.pos, r.poId).no) : 'Tanpa PO'}</td><td class="n">${r.lines.length}</td><td class="n">${rp(r.lines.reduce((a, l) => a + l.qtyBase * l.costBase, 0))}</td><td>${esc(r.user)}</td></tr>`);
+  const hist = S.inbounds.slice(0, 20).map(r => `<tr><td class="mono"><a href="#" data-act="openInbound" data-id="${r.id}">${esc(r.no)}</a></td><td>${fd(parseDate(transactionDateOf(r, 'ts')))}</td><td>${esc(SU(r.supplierId)?.name)}</td><td>${r.poId ? esc(byId(S.pos, r.poId).no) : 'Tanpa PO'}</td><td class="n">${r.lines.length}</td><td class="n">${rp(r.lines.reduce((a, l) => a + l.qtyBase * l.costBase, 0))}</td><td>${esc(r.user)}</td></tr>`);
   return `<div class="rule">${ic('info')}<span><strong>Aturan:</strong> semua barang dari supplier masuk lewat ${esc(c ? c.name : 'Gudang Central')} untuk QC dan penagihan terpusat. Tanggal kedaluwarsa dan nomor batch wajib diisi.</span></div>
   ${!ok ? `<div class="alert info">${ic('info')}${!can('inbound') ? `Peran ${esc(ROLES[cur().role].label)} hanya bisa melihat riwayat penerimaan.` : 'Penerimaan hanya oleh staf Gudang Central. Akun Anda bertugas di gudang lain.'}</div>` : `
   <section class="panel"><header class="ph"><h3>Terima barang</h3></header>
   <div class="formrow">
+    ${fld('Tanggal transaksi', `<input type="date" data-bind="inb.transactionDate" value="${esc(d.transactionDate)}" required>`, 'Nomor RCV dibuat otomatis saat disimpan')}
     ${fld('Dari purchase order', `<select data-bind="inb.poId" data-hook="inbPO">${opt('', 'Tanpa PO (manual)', d.poId)}${openPOs.map(p => opt(p.id, `${p.no}, ${SU(p.supplierId).name}`, d.poId)).join('')}</select>`, openPOs.length ? `${openPOs.length} PO menunggu barang` : 'Tidak ada PO yang menunggu barang')}
     ${fld('Supplier', `<select data-bind="inb.supplierId" ${d.poId ? 'disabled' : ''}>${opt('', 'Pilih supplier', d.supplierId)}${S.suppliers.filter(s => s.isActive).map(s => opt(s.id, s.name, d.supplierId)).join('')}</select>`)}
     ${fld('No. surat jalan supplier', `<input data-bind="inb.docRef" value="${esc(d.docRef)}" maxlength="60" placeholder="Opsional">`)}
@@ -2057,11 +2098,11 @@ V.inbound = () => {
   ${F.inbErr.length ? `<div class="alert bad">${ic('alert')}<strong>Belum bisa disimpan</strong><ul>${F.inbErr.map(e => `<li>${esc(e)}</li>`).join('')}</ul></div>` : ''}
   <div class="actions">${d.poId ? '' : btn('Tambah baris', 'inbAdd')}<div class="sp"></div>${btn('Kosongkan', 'inbReset')}${btn('Periksa & simpan', 'inbSubmit', {}, { k: 'pri', perm: 'inbound' })}</div>
   </section>`}
-  <section class="panel"><header class="ph"><h3>Riwayat penerimaan</h3></header>${tbl(['No.', 'Waktu', 'Supplier', 'PO', ['Batch', 'n'], ['Nilai', 'n'], 'Oleh'], hist, { empty: 'Belum ada penerimaan sejak data demo dibuat.' })}</section>`;
+  <section class="panel"><header class="ph"><h3>Riwayat penerimaan</h3></header>${tbl(['Kode transaksi', 'Tanggal transaksi', 'Supplier', 'PO', ['Batch', 'n'], ['Nilai', 'n'], 'Oleh'], hist, { empty: 'Belum ada penerimaan sejak data demo dibuat.' })}</section>`;
 };
 A.openInbound = d => {
   const r = byId(S.inbounds, d.id);
-  openModal({ title: r.no, wide: true, body: () => `<dl class="meta"><div><dt>Supplier</dt><dd>${esc(SU(r.supplierId).name)}</dd></div><div><dt>PO</dt><dd>${r.poId ? esc(byId(S.pos, r.poId).no) : 'Tanpa PO'}</dd></div><div><dt>Surat jalan</dt><dd>${esc(r.docRef || '–')}</dd></div><div><dt>Diterima</dt><dd>${fdt(r.ts)} oleh ${esc(r.user)}</dd></div></dl>
+  openModal({ title: r.no, wide: true, body: () => `<dl class="meta"><div><dt>Kode transaksi</dt><dd class="mono">${esc(r.no)}</dd></div><div><dt>Tanggal transaksi</dt><dd>${fd(parseDate(transactionDateOf(r, 'ts')))}</dd></div><div><dt>Supplier</dt><dd>${esc(SU(r.supplierId).name)}</dd></div><div><dt>PO</dt><dd>${r.poId ? esc(byId(S.pos, r.poId).no) : 'Tanpa PO'}</dd></div><div><dt>Surat jalan</dt><dd>${esc(r.docRef || '–')}</dd></div><div><dt>Dicatat</dt><dd>${fdt(r.ts)} oleh ${esc(r.user)}</dd></div></dl>
     ${tbl(['Produk', 'Batch', 'Rak', 'Kedaluwarsa', ['Diterima', 'n'], ['HPP/satuan dasar', 'n'], ['Nilai', 'n']], r.lines.map(l => { const p = P(l.productId); return `<tr><td>${esc(p.name)}</td><td class="mono">${esc(l.batchNo)}</td><td>${esc(l.rack || '–')}</td><td>${fd(l.expDate)}</td><td class="n">${num(l.qtyUom)} ${esc(l.uom)} <span class="u">(${num(l.qtyBase)} ${esc(p.baseUom)})</span></td><td class="n">${rp(l.costBase)}</td><td class="n">${rp(l.qtyBase * l.costBase)}</td></tr>`; }))}` });
 };
 
@@ -2069,7 +2110,7 @@ A.openInbound = d => {
 const blankTrfLine = () => ({ productId: '', uom: '', uomQty: '', manual: false, picks: {} });
 A.newTransfer = () => {
   const my = myWhIds(); const src = my.includes(central()?.id) ? central().id : my[0];
-  F.trf = { srcId: String(src || ''), dstId: '', note: '', lines: [blankTrfLine()] };
+  F.trf = { transactionDate: isoDate(Date.now()), srcId: String(src || ''), dstId: '', note: '', lines: [blankTrfLine()] };
   openModal({ title: 'Draft transfer baru', wide: true, body: trfForm, foot: () => `<button type="button" class="btn" data-act="closeModal">Batal</button>${btn('Buat draft & reserve stok', 'trfSave', {}, { k: 'pri', perm: 'transfer' })}` });
 };
 H.trfSrc = () => { F.trf.lines = [blankTrfLine()]; if (F.trf.dstId === F.trf.srcId) F.trf.dstId = ''; };
@@ -2108,12 +2149,12 @@ function trfForm() {
       ${t.lines.length > 1 ? `<button type="button" class="icon" data-act="trfDel" data-i="${i}" aria-label="Hapus baris">×</button>` : ''}
     </div>${detail}</div>`;
   });
-  return `<div class="formrow">${fld('Gudang asal', whSel('trf.srcId', t.srcId, srcList, { rr: 1, hook: 'trfSrc', blank: 'Pilih gudang' }))}${fld('Gudang tujuan', whSel('trf.dstId', t.dstId, actW().filter(w => w.id !== +t.srcId), { blank: 'Pilih gudang' }))}${fld('Catatan', `<input data-bind="trf.note" value="${esc(t.note)}" maxlength="200" placeholder="Opsional">`, '', 'grow')}</div>
+  return `<div class="formrow">${fld('Tanggal transaksi', `<input type="date" data-bind="trf.transactionDate" value="${esc(t.transactionDate)}" required>`, 'Nomor TR dibuat otomatis saat disimpan')}${fld('Gudang asal', whSel('trf.srcId', t.srcId, srcList, { rr: 1, hook: 'trfSrc', blank: 'Pilih gudang' }))}${fld('Gudang tujuan', whSel('trf.dstId', t.dstId, actW().filter(w => w.id !== +t.srcId), { blank: 'Pilih gudang' }))}${fld('Catatan', `<input data-bind="trf.note" value="${esc(t.note)}" maxlength="200" placeholder="Opsional">`, '', 'grow')}</div>
   ${lines.join('')}
   <div class="actions">${btn('Tambah barang', 'trfAdd')}<div class="sp"></div><span class="muted">${ttl < Infinity ? `Stok di-reserve selama ${ttl} jam. Draft yang tidak dikirim dalam waktu itu dibatalkan otomatis.` : 'TTL reservasi mengikuti kategori atau override produk.'}</span></div>`;
 }
 function trfPayload() {
-  return { srcId: F.trf.srcId, dstId: F.trf.dstId, note: F.trf.note, lines: F.trf.lines.map(l => { const p = P(l.productId); return { productId: l.productId, uom: l.uom, uomQty: l.uomQty, qty: p ? r4((+l.uomQty || 0) * uomF(p, l.uom)) : 0, manual: l.manual, picks: l.picks }; }) };
+  return { transactionDate: F.trf.transactionDate, srcId: F.trf.srcId, dstId: F.trf.dstId, note: F.trf.note, lines: F.trf.lines.map(l => { const p = P(l.productId); return { productId: l.productId, uom: l.uom, uomQty: l.uomQty, qty: p ? r4((+l.uomQty || 0) * uomF(p, l.uom)) : 0, manual: l.manual, picks: l.picks }; }) };
 }
 A.trfSave = () => {
   const d = trfPayload(); const r = createTransfer(d);
@@ -2128,10 +2169,10 @@ V.transfer = () => {
   const rows = list.map(t => {
     const val = t.lines.reduce((a, l) => a + l.picks.reduce((s, p) => s + p.qty * p.cost, 0), 0);
     const info = t.status === 'draft' ? `Reserve habis dalam ${ttlLeft(t)}` : t.status === 'dikirim' ? `Dikirim ${fdt(t.shippedAt)}` : t.status === 'diterima' ? `Diterima ${fdt(t.receivedAt)}${t.scrapNo ? ', ada selisih' : ''}` : fdt(t.closedAt);
-    return `<tr><td class="mono"><a href="#" data-act="openTransfer" data-id="${t.id}">${esc(t.no)}</a></td><td>${esc(W(t.srcId).name)} <span class="arrow">ke</span> ${esc(W(t.dstId).name)}</td><td class="n">${t.lines.length}</td><td class="n">${rp(val)}</td><td>${st(TRF_ST, t.status)}${t.fifoOverride ? ' ' + chip('FEFO', 'warn') : ''}</td><td>${info}</td><td>${esc(t.createdBy)}</td></tr>`;
+    return `<tr><td class="mono"><a href="#" data-act="openTransfer" data-id="${t.id}">${esc(t.no)}</a></td><td>${fd(parseDate(transactionDateOf(t)))}</td><td>${esc(W(t.srcId).name)} <span class="arrow">ke</span> ${esc(W(t.dstId).name)}</td><td class="n">${t.lines.length}</td><td class="n">${rp(val)}</td><td>${st(TRF_ST, t.status)}${t.fifoOverride ? ' ' + chip('FEFO', 'warn') : ''}</td><td>${info}</td><td>${esc(t.createdBy)}</td></tr>`;
   });
   return `<div class="toolbar">${seg('trfTab', tab, [['aktif', 'Berjalan'], ['selesai', 'Selesai'], ['semua', 'Semua']])}<div class="sp"></div>${btn('Buat draft transfer', 'newTransfer', {}, { k: 'pri', perm: 'transfer' })}</div>
-  ${tbl(['No.', 'Rute', ['Barang', 'n'], ['Nilai', 'n'], 'Status', 'Keterangan', 'Dibuat'], rows, { empty: 'Belum ada transfer di tab ini.' })}
+  ${tbl(['Kode transaksi', 'Tanggal transaksi', 'Rute', ['Barang', 'n'], ['Nilai', 'n'], 'Status', 'Keterangan', 'Dibuat oleh'], rows, { empty: 'Belum ada transfer di tab ini.' })}
   <p class="note">Alur: draft (stok di-reserve, pengambilan FIFO) lalu kirim (stok keluar, status dalam perjalanan) lalu terima di cabang. Kelebihan langsung masuk stok cabang; kekurangan menjadi draft scrap yang menunggu approval.</p>`;
 };
 A.openTransfer = d => {
@@ -2140,7 +2181,7 @@ A.openTransfer = d => {
 };
 function trfDetail(t) {
   const rows = []; t.lines.forEach(l => { const p = P(l.productId); l.picks.forEach(pk => { const diff = pk.received == null ? null : r4(pk.received - pk.qty); rows.push(`<tr><td>${esc(p.name)}</td><td class="mono">${esc(pk.batchNo)}</td><td>${esc(pk.rack || '–')}</td><td>${expCell(pk.expDate, p)}</td><td class="n">${qtyU(pk.qty, p)}</td><td class="n">${pk.received == null ? '–' : num(pk.received)}</td><td class="n ${diff < 0 ? 'bad-t' : diff > 0 ? 'ok-t' : ''}">${diff == null || diff === 0 ? '–' : (diff > 0 ? '+' : '') + num(diff)}</td><td class="n">${rp(pk.qty * pk.cost)}</td></tr>`); }); });
-  return `<dl class="meta"><div><dt>Rute</dt><dd>${esc(W(t.srcId).name)} ke ${esc(W(t.dstId).name)}</dd></div><div><dt>Status</dt><dd>${st(TRF_ST, t.status)}${t.fifoOverride ? ' ' + chip('Override FIFO (FEFO)', 'warn') : ''}</dd></div><div><dt>Dibuat</dt><dd>${fdt(t.createdAt)} oleh ${esc(t.createdBy)}</dd></div>
+  return `<dl class="meta"><div><dt>Kode transaksi</dt><dd class="mono">${esc(t.no)}</dd></div><div><dt>Tanggal transaksi</dt><dd>${fd(parseDate(transactionDateOf(t)))}</dd></div><div><dt>Rute</dt><dd>${esc(W(t.srcId).name)} ke ${esc(W(t.dstId).name)}</dd></div><div><dt>Status</dt><dd>${st(TRF_ST, t.status)}${t.fifoOverride ? ' ' + chip('Override FIFO (FEFO)', 'warn') : ''}</dd></div><div><dt>Dicatat</dt><dd>${fdt(t.createdAt)} oleh ${esc(t.createdBy)}</dd></div>
   ${t.status === 'draft' ? `<div><dt>Reservasi</dt><dd>${t.ttlHours} jam, habis ${fdt(t.expiresAt)} (${ttlLeft(t)} lagi)</dd></div>` : ''}${t.shippedAt ? `<div><dt>Dikirim</dt><dd>${fdt(t.shippedAt)}</dd></div>` : ''}${t.receivedAt ? `<div><dt>Diterima</dt><dd>${fdt(t.receivedAt)} oleh ${esc(t.receivedBy)}</dd></div>` : ''}${t.scrapNo ? `<div><dt>Selisih kurang</dt><dd>Draft scrap ${esc(t.scrapNo)}</dd></div>` : ''}<div><dt>Dicetak</dt><dd>${t.printCount || 0} kali</dd></div></dl>
   ${t.note ? `<p class="note">${esc(t.note)}</p>` : ''}
   ${tbl(['Produk', 'Batch', 'Rak asal', 'Kedaluwarsa', ['Dikirim', 'n'], ['Diterima', 'n'], ['Selisih', 'n'], ['Nilai', 'n']], rows)}`;
@@ -2775,17 +2816,17 @@ A.saveBom = () => {
 /* ================= SCRAP ================= */
 V.scrap = () => {
   const tab = F.scrTab; const list = S.scraps.filter(s => tab === 'draft' ? s.status === 'draft' : s.status !== 'draft').sort((a, b) => b.createdAt - a.createdAt);
-  const rows = list.map(s => `<tr><td class="mono"><a href="#" data-act="openScrap" data-id="${s.id}">${esc(s.no)}</a></td><td>${esc(W(s.warehouseId).name)}</td><td>${s.source === 'transit' ? chip('Selisih transit', 'sky') : chip('Manual', 'mute')}</td><td>${esc(s.reason)}</td><td class="n">${rp(scrapVal(s))}</td><td>${st(SC_ST, s.status)}</td><td>${fdt(s.createdAt)}<div class="sub">${esc(s.createdBy)}</div></td></tr>`);
+  const rows = list.map(s => `<tr><td class="mono"><a href="#" data-act="openScrap" data-id="${s.id}">${esc(s.no)}</a></td><td>${fd(parseDate(transactionDateOf(s)))}</td><td>${esc(W(s.warehouseId).name)}</td><td>${s.source === 'transit' ? chip('Selisih transit', 'sky') : chip('Manual', 'mute')}</td><td>${esc(s.reason)}</td><td class="n">${rp(scrapVal(s))}</td><td>${st(SC_ST, s.status)}</td><td>${esc(s.createdBy)}</td></tr>`);
   return `<div class="toolbar">${seg('scrTab', tab, [['draft', 'Menunggu approval'], ['riwayat', 'Riwayat']])}<div class="sp"></div>${btn('Ajukan scrap', 'newScrap', {}, { k: 'pri', perm: 'scrap.create' })}</div>
-  ${tbl(['No.', 'Gudang', 'Sumber', 'Alasan', ['Nilai', 'n'], 'Status', 'Diajukan'], rows, { empty: tab === 'draft' ? 'Tidak ada scrap yang menunggu approval.' : 'Belum ada riwayat scrap.' })}
+  ${tbl(['Kode transaksi', 'Tanggal transaksi', 'Gudang', 'Sumber', 'Alasan', ['Nilai', 'n'], 'Status', 'Diajukan oleh'], rows, { empty: tab === 'draft' ? 'Tidak ada scrap yang menunggu approval.' : 'Belum ada riwayat scrap.' })}
   <p class="note">Scrap manual memotong stok setelah disetujui Approver. Scrap dari selisih transit hanya mencatat kerugian karena barangnya memang tidak sampai.</p>`;
 };
 A.newScrap = () => {
-  const my = myWhIds(); F.scr = { warehouseId: String(my[0] || ''), batchId: '', qty: '', reason: 'Kedaluwarsa', note: '' };
+  const my = myWhIds(); F.scr = { transactionDate: isoDate(Date.now()), warehouseId: String(my[0] || ''), batchId: '', qty: '', reason: 'Kedaluwarsa', note: '' };
   openModal({ title: 'Ajukan scrap', body: () => {
     const f = F.scr; const bs = S.batches.filter(b => b.warehouseId === +f.warehouseId && avail(b) > 1e-9).sort((a, b) => a.expDate - b.expDate);
     const b = byId(S.batches, f.batchId); const p = b && P(b.productId);
-    return `${fld('Gudang', whSel('scr.warehouseId', f.warehouseId, actW().filter(w => my.includes(w.id)), { rr: 1 }))}
+    return `<div class="formrow">${fld('Tanggal transaksi', `<input type="date" data-bind="scr.transactionDate" value="${esc(f.transactionDate)}" required>`, 'Nomor BS dibuat otomatis saat disimpan')}${fld('Gudang', whSel('scr.warehouseId', f.warehouseId, actW().filter(w => my.includes(w.id)), { rr: 1 }))}</div>
     ${fld('Batch', `<select data-bind="scr.batchId" data-rr>${opt('', 'Pilih batch', f.batchId)}${bs.map(x => { const pp = P(x.productId); const dl = daysLeft(x.expDate); return opt(x.id, `${pp.name}, ${x.batchNo}, ${dl < 0 ? 'kedaluwarsa' : 'exp ' + fd(x.expDate)}, tersedia ${num(avail(x))} ${pp.baseUom}`, f.batchId); }).join('')}</select>`, 'Diurutkan dari yang paling cepat kedaluwarsa')}
     <div class="formrow">${fld('Jumlah' + (p ? ` (${p.baseUom})` : ''), `<input class="n" type="number" min="0" step="any" data-bind="scr.qty" value="${esc(f.qty)}">`, b ? `Maks. ${num(avail(b))}, nilai ${rp((+f.qty || 0) * b.cost)}` : '')}
     ${fld('Alasan', `<select data-bind="scr.reason">${['Kedaluwarsa', 'Rusak', 'Terkontaminasi', 'Hilang', 'Lainnya'].map(r => opt(r, r, f.reason)).join('')}</select>`)}</div>`;
@@ -2794,7 +2835,7 @@ A.newScrap = () => {
 A.scrSave = () => { const s = createManualScrap(F.scr); closeModal(); commit(`${s.no} diajukan, menunggu approval.`); };
 A.openScrap = d => {
   const s = byId(S.scraps, d.id);
-  openModal({ title: `Scrap ${s.no}`, wide: true, body: () => `<dl class="meta"><div><dt>Gudang</dt><dd>${esc(W(s.warehouseId).name)}</dd></div><div><dt>Sumber</dt><dd>${s.source === 'transit' ? 'Selisih transit ' + esc(s.ref) : 'Pengajuan manual'}</dd></div><div><dt>Alasan</dt><dd>${esc(s.reason)}</dd></div><div><dt>Status</dt><dd>${st(SC_ST, s.status)}</dd></div><div><dt>Diajukan</dt><dd>${fdt(s.createdAt)} oleh ${esc(s.createdBy)}</dd></div>${s.approvedAt ? `<div><dt>Diputuskan</dt><dd>${fdt(s.approvedAt)} oleh ${esc(s.approvedBy)}</dd></div>` : ''}</dl>
+  openModal({ title: `Scrap ${s.no}`, wide: true, body: () => `<dl class="meta"><div><dt>Kode transaksi</dt><dd class="mono">${esc(s.no)}</dd></div><div><dt>Tanggal transaksi</dt><dd>${fd(parseDate(transactionDateOf(s)))}</dd></div><div><dt>Gudang</dt><dd>${esc(W(s.warehouseId).name)}</dd></div><div><dt>Sumber</dt><dd>${s.source === 'transit' ? 'Selisih transit ' + esc(s.ref) : 'Pengajuan manual'}</dd></div><div><dt>Alasan</dt><dd>${esc(s.reason)}</dd></div><div><dt>Status</dt><dd>${st(SC_ST, s.status)}</dd></div><div><dt>Dicatat</dt><dd>${fdt(s.createdAt)} oleh ${esc(s.createdBy)}</dd></div>${s.approvedAt ? `<div><dt>Diputuskan</dt><dd>${fdt(s.approvedAt)} oleh ${esc(s.approvedBy)}</dd></div>` : ''}</dl>
     ${tbl(['Produk', 'Batch', ['Qty', 'n'], ['HPP/satuan', 'n'], ['Nilai', 'n'], 'Catatan'], s.lines.map(l => { const p = P(l.productId); return `<tr><td>${esc(p.name)}</td><td class="mono">${esc(l.batchNo)}</td><td class="n">${qtyU(l.qty, p)}</td><td class="n">${rp(l.cost)}</td><td class="n">${rp(l.qty * l.cost)}</td><td>${esc(l.note || '')}</td></tr>`; }), { foot: `<tfoot><tr><td colspan="4">Total kerugian</td><td class="n">${rp(scrapVal(s))}</td><td></td></tr></tfoot>` })}`,
     foot: () => s.status === 'draft' ? `<div class="sp"></div>${btn('Tolak', 'scrReject', { id: s.id }, { k: 'ghost-bad', perm: 'scrap.approve' })}${btn('Setujui scrap', 'scrApprove', { id: s.id }, { k: 'pri', perm: 'scrap.approve' })}` : '' });
 };
@@ -2804,9 +2845,9 @@ A.scrReject = d => { rejectScrap(+d.id); closeModal(); commit('Scrap ditolak.');
 /* ================= STOCK OPNAME ================= */
 V.opname = () => {
   const tab = F.opnTab; const list = S.opnames.filter(o => tab === 'aktif' ? o.status !== 'diposting' : o.status === 'diposting');
-  const rows = list.map(o => `<tr><td class="mono"><a href="#" data-act="openOpname" data-id="${o.id}">${esc(o.no)}</a></td><td>${esc(W(o.warehouseId).name)}</td><td>${esc(o.rack || 'Semua rak')}</td><td class="n">${o.lines.length}</td><td class="n">${o.lines.filter(l => l.counted != null && l.counted !== '').length}</td><td>${st(OP_ST, o.status)}</td><td>${fdt(o.createdAt)}<div class="sub">${esc(o.createdBy)}</div></td></tr>`);
+  const rows = list.map(o => `<tr><td class="mono"><a href="#" data-act="openOpname" data-id="${o.id}">${esc(o.no)}</a></td><td>${fd(parseDate(transactionDateOf(o)))}</td><td>${esc(W(o.warehouseId).name)}</td><td>${esc(o.rack || 'Semua rak')}</td><td class="n">${o.lines.length}</td><td class="n">${o.lines.filter(l => l.counted != null && l.counted !== '').length}</td><td>${st(OP_ST, o.status)}</td><td>${esc(o.createdBy)}</td></tr>`);
   return `<div class="toolbar">${seg('opnTab', tab, [['aktif', 'Berjalan'], ['selesai', 'Diposting']])}<div class="sp"></div>${btn('Mulai sesi opname', 'newOpname', {}, { k: 'pri', perm: 'opname.count' })}</div>
-  ${tbl(['No.', 'Gudang', 'Rak', ['Baris', 'n'], ['Terisi', 'n'], 'Status', 'Dibuka'], rows, { empty: tab === 'aktif' ? 'Belum ada sesi berjalan. Mulai sesi untuk satu gudang atau satu rak.' : 'Belum ada sesi yang diposting.' })}
+  ${tbl(['Kode transaksi', 'Tanggal transaksi', 'Gudang', 'Rak', ['Baris', 'n'], ['Terisi', 'n'], 'Status', 'Dibuka oleh'], rows, { empty: tab === 'aktif' ? 'Belum ada sesi berjalan. Mulai sesi untuk satu gudang atau satu rak.' : 'Belum ada sesi yang diposting.' })}
   <section class="panel steps"><header class="ph"><h3>Cara kerja blind count</h3></header><ol>
     <li>Buka sesi untuk satu gudang, atau satu rak agar staf bisa dibagi per lokasi.</li>
     <li>Unduh template Excel. Template tidak memuat jumlah stok sistem, hanya daftar barang dan batch yang harus dihitung.</li>
@@ -2814,19 +2855,19 @@ V.opname = () => {
     <li>Approver melihat selisih terhadap sistem dan memposting penyesuaian, atau meminta hitung ulang.</li></ol></section>`;
 };
 A.newOpname = () => {
-  const my = myWhIds(); F.opn = { warehouseId: String(my[0] || ''), rack: '' };
+  const my = myWhIds(); F.opn = { transactionDate: isoDate(Date.now()), warehouseId: String(my[0] || ''), rack: '' };
   openModal({ title: 'Mulai sesi stock opname', body: () => {
     const masterRks = (S.racks || []).filter(r => r.warehouseId === +F.opn.warehouseId && r.isActive).map(r => r.code);
     const batchRks = S.batches.filter(b => b.warehouseId === +F.opn.warehouseId && b.qty > 1e-9).map(b => b.rack || '-');
     const racks = [...new Set([...masterRks, ...batchRks])].filter(Boolean).sort();
-    return `${fld('Gudang', whSel('opn.warehouseId', F.opn.warehouseId, actW().filter(w => my.includes(w.id)), { rr: 1 }))}${fld('Rak', `<select data-bind="opn.rack">${opt('', 'Semua rak', F.opn.rack)}${racks.map(r => opt(r, r, F.opn.rack)).join('')}</select>`, 'Pilih satu rak untuk membagi pekerjaan ke beberapa staf')}`;
+    return `${fld('Tanggal transaksi', `<input type="date" data-bind="opn.transactionDate" value="${esc(F.opn.transactionDate)}" required>`, 'Nomor SO dibuat otomatis saat sesi dibuka')}${fld('Gudang', whSel('opn.warehouseId', F.opn.warehouseId, actW().filter(w => my.includes(w.id)), { rr: 1 }))}${fld('Rak', `<select data-bind="opn.rack">${opt('', 'Semua rak', F.opn.rack)}${racks.map(r => opt(r, r, F.opn.rack)).join('')}</select>`, 'Pilih satu rak untuk membagi pekerjaan ke beberapa staf')}`;
   }, foot: () => `<button type="button" class="btn" data-act="closeModal">Batal</button>${btn('Buka sesi', 'opnCreate', {}, { k: 'pri', perm: 'opname.count' })}` });
 };
 A.opnCreate = () => { const o = createOpname(F.opn); save(); render(); A.openOpname({ id: o.id }); toast(`${o.no} dibuka dengan ${o.lines.length} baris.`); };
 A.openOpname = d => { const o = byId(S.opnames, d.id); F.opnView = o.id; openModal({ title: `Stock opname ${o.no}`, wide: true, body: () => opnBody(o), foot: () => opnFoot(o) }); };
 function opnBody(o) {
   const w = W(o.warehouseId); const filled = o.lines.filter(l => l.counted != null && l.counted !== '').length;
-  const meta = `<dl class="meta"><div><dt>Gudang</dt><dd>${esc(w.name)}</dd></div><div><dt>Rak</dt><dd>${esc(o.rack || 'Semua rak')}</dd></div><div><dt>Status</dt><dd>${st(OP_ST, o.status)}</dd></div><div><dt>Progres</dt><dd>${filled} dari ${o.lines.length} baris</dd></div>${o.recount ? `<div><dt>Hitung ulang</dt><dd>${o.recount} kali</dd></div>` : ''}</dl>`;
+  const meta = `<dl class="meta"><div><dt>Kode transaksi</dt><dd class="mono">${esc(o.no)}</dd></div><div><dt>Tanggal transaksi</dt><dd>${fd(parseDate(transactionDateOf(o)))}</dd></div><div><dt>Gudang</dt><dd>${esc(w.name)}</dd></div><div><dt>Rak</dt><dd>${esc(o.rack || 'Semua rak')}</dd></div><div><dt>Status</dt><dd>${st(OP_ST, o.status)}</dd></div><div><dt>Progres</dt><dd>${filled} dari ${o.lines.length} baris</dd></div>${o.recount ? `<div><dt>Hitung ulang</dt><dd>${o.recount} kali</dd></div>` : ''}</dl>`;
   if (o.status === 'menghitung') {
     const canCount = can('opname.count') && myWhIds().includes(o.warehouseId);
     return meta + `<div class="opn-tools">${btn('Unduh template Excel', 'opnTemplate', { id: o.id }, { perm: 'opname.count' })}
@@ -2876,15 +2917,15 @@ A.fcToPO = () => { const vis = new Set(forecast(S.settings.forecastWindow).filte
 /* ================= PURCHASE ORDER ================= */
 V.po = () => {
   const tab = F.poTab; const list = S.pos.filter(p => tab === 'aktif' ? ['draft', 'dipesan'].includes(p.status) : !['draft', 'dipesan'].includes(p.status)).sort((a, b) => b.createdAt - a.createdAt);
-  const rows = list.map(p => `<tr><td class="mono"><a href="#" data-act="openPO" data-id="${p.id}">${esc(p.no)}</a></td><td>${esc(SU(p.supplierId)?.name)}</td><td class="n">${p.lines.length}</td><td class="n">${rp(poTotal(p))}</td><td>${st(PO_ST, p.status)}${p.shortClosed ? ' ' + chip('Kurang terima', 'warn') : ''}${poAnom(p) ? ' ' + chip('Anomali harga', 'bad') : ''}</td><td>${p.orderedAt ? fd(p.orderedAt) : '–'}</td><td>${p.closedAt && p.status === 'selesai' ? fd(p.closedAt) : '–'}</td></tr>`);
+  const rows = list.map(p => `<tr><td class="mono"><a href="#" data-act="openPO" data-id="${p.id}">${esc(p.no)}</a></td><td>${fd(parseDate(transactionDateOf(p)))}</td><td>${esc(SU(p.supplierId)?.name)}</td><td class="n">${p.lines.length}</td><td class="n">${rp(poTotal(p))}</td><td>${st(PO_ST, p.status)}${p.shortClosed ? ' ' + chip('Kurang terima', 'warn') : ''}${poAnom(p) ? ' ' + chip('Anomali harga', 'bad') : ''}</td><td>${p.orderedAt ? fd(p.orderedAt) : '–'}</td><td>${p.closedAt && p.status === 'selesai' ? fd(p.closedAt) : '–'}</td></tr>`);
   return `<div class="toolbar">${seg('poTab', tab, [['aktif', 'Berjalan'], ['selesai', 'Selesai & batal']])}<div class="sp"></div>${btn('Buat PO', 'newPO', {}, { k: 'pri', perm: 'po' })}</div>
-  ${tbl(['No.', 'Supplier', ['Barang', 'n'], ['Total', 'n'], 'Status', 'Dipesan', 'Diterima'], rows, { empty: 'Tidak ada PO di tab ini.' })}`;
+  ${tbl(['Kode transaksi', 'Tanggal transaksi', 'Supplier', ['Barang', 'n'], ['Total', 'n'], 'Status', 'Dipesan', 'Diterima'], rows, { empty: 'Tidak ada PO di tab ini.' })}`;
 };
 const lineDev = l => { const p = P(l.productId); if (!p || !p.refPrice) return 0; return ((+l.price * (1 - (+l.disc || 0) / 100)) / (l.factor || uomF(p, l.uom)) - p.refPrice) / p.refPrice * 100; };
 const poAnom = po => po.lines.some(l => Math.abs(lineDev(l)) > S.settings.priceTolerance);
 A.newPO = d => {
   const po = d?.id ? byId(S.pos, d.id) : null;
-  F.po = po ? { id: po.id, supplierId: String(po.supplierId), note: po.note, lines: po.lines.map(l => ({ productId: String(l.productId), uom: l.uom, qty: String(l.qty), price: String(l.price), disc: String(l.disc || 0), src: '' })) } : { id: null, supplierId: '', note: '', lines: [{ productId: '', uom: '', qty: '', price: '', disc: '0', src: '' }] };
+  F.po = po ? { id: po.id, no: po.no, transactionDate: transactionDateOf(po), supplierId: String(po.supplierId), note: po.note, lines: po.lines.map(l => ({ productId: String(l.productId), uom: l.uom, qty: String(l.qty), price: String(l.price), disc: String(l.disc || 0), src: '' })) } : { id: null, no: '', transactionDate: isoDate(Date.now()), supplierId: '', note: '', lines: [{ productId: '', uom: '', qty: '', price: '', disc: '0', src: '' }] };
   openModal({ title: po ? `Ubah ${po.no}` : 'Purchase order baru', wide: true, body: poForm, foot: () => `<button type="button" class="btn" data-act="closeModal">Batal</button>${btn('Simpan draft', 'poSave', {}, { k: 'pri', perm: 'po' })}` });
 };
 H.poProd = d => { const l = F.po.lines[d.i]; const p = P(l.productId); if (p) { l.uom = p.poUom; const lp = lastPrice(p.id, l.uom); l.price = String(lp.price); l.src = lp.src; if (!F.po.supplierId && p.supplierId) F.po.supplierId = String(p.supplierId); } };
@@ -2904,7 +2945,7 @@ function poForm() {
     <td><input aria-label="Diskon persen" class="n sm" type="number" min="0" max="100" step="any" data-bind="po.lines.${i}.disc" data-rr value="${esc(l.disc)}"></td>
     <td class="n">${rp(sub)}</td><td>${f.lines.length > 1 ? `<button type="button" class="icon" data-act="poDel" data-i="${i}" aria-label="Hapus baris">×</button>` : ''}</td></tr>`;
   });
-  return `<div class="formrow">${fld('Supplier', `<select data-bind="po.supplierId" data-rr>${opt('', 'Pilih supplier', f.supplierId)}${S.suppliers.filter(s => s.isActive).map(s => opt(s.id, s.name, f.supplierId)).join('')}</select>`, f.supplierId ? `Lead time aktual ${num(leadTime(+f.supplierId, null).days, 1)} hari (${esc(leadTime(+f.supplierId, null).src)})` : '')}${fld('Catatan', `<input data-bind="po.note" value="${esc(f.note)}" maxlength="200">`, '', 'grow')}</div>
+  return `<div class="formrow">${fld('Tanggal transaksi', `<input type="date" data-bind="po.transactionDate" value="${esc(f.transactionDate)}" ${f.id ? 'disabled' : 'required'}>`, f.id ? `Kode ${esc(f.no)}; tanggal dikunci setelah dibuat` : 'Nomor PO dibuat otomatis saat disimpan')}${fld('Supplier', `<select data-bind="po.supplierId" data-rr>${opt('', 'Pilih supplier', f.supplierId)}${S.suppliers.filter(s => s.isActive).map(s => opt(s.id, s.name, f.supplierId)).join('')}</select>`, f.supplierId ? `Lead time aktual ${num(leadTime(+f.supplierId, null).days, 1)} hari (${esc(leadTime(+f.supplierId, null).src)})` : '')}${fld('Catatan', `<input data-bind="po.note" value="${esc(f.note)}" maxlength="200">`, '', 'grow')}</div>
   ${tbl(['Produk', 'Satuan', ['Jumlah', 'n'], ['Harga/satuan', 'n'], ['Diskon %', 'n'], ['Subtotal', 'n'], ''], rows, { cls: 'edit', foot: `<tfoot><tr><td colspan="5">Total</td><td class="n">${rp(total)}</td><td></td></tr></tfoot>` })}
   <div class="actions">${btn('Tambah barang', 'poAdd')}<div class="sp"></div><span class="muted">Harga terisi otomatis dan tetap bisa diubah. Selisih di atas ${S.settings.priceTolerance}% dari referensi masuk laporan anomali.</span></div>`;
 }
@@ -2913,7 +2954,7 @@ A.openPO = d => {
   const po = byId(S.pos, d.id);
   openModal({ title: `Purchase order ${po.no}`, wide: true, body: () => {
     const lt = po.orderedAt && po.closedAt && po.status === 'selesai' ? Math.round((po.closedAt - po.orderedAt) / DAY * 10) / 10 : null;
-    return `<dl class="meta"><div><dt>Supplier</dt><dd>${esc(SU(po.supplierId).name)}</dd></div><div><dt>Status</dt><dd>${st(PO_ST, po.status)}</dd></div><div><dt>Dibuat</dt><dd>${fdt(po.createdAt)} oleh ${esc(po.createdBy)}</dd></div>${po.orderedAt ? `<div><dt>Dipesan</dt><dd>${fdt(po.orderedAt)}</dd></div>` : ''}${lt != null ? `<div><dt>Lead time aktual</dt><dd>${num(lt, 1)} hari</dd></div>` : ''}${po.grnNo ? `<div><dt>Penerimaan</dt><dd>${esc(po.grnNo)}</dd></div>` : ''}</dl>
+    return `<dl class="meta"><div><dt>Kode transaksi</dt><dd class="mono">${esc(po.no)}</dd></div><div><dt>Tanggal transaksi</dt><dd>${fd(parseDate(transactionDateOf(po)))}</dd></div><div><dt>Supplier</dt><dd>${esc(SU(po.supplierId).name)}</dd></div><div><dt>Status</dt><dd>${st(PO_ST, po.status)}</dd></div><div><dt>Dicatat</dt><dd>${fdt(po.createdAt)} oleh ${esc(po.createdBy)}</dd></div>${po.orderedAt ? `<div><dt>Dipesan</dt><dd>${fdt(po.orderedAt)}</dd></div>` : ''}${lt != null ? `<div><dt>Lead time aktual</dt><dd>${num(lt, 1)} hari</dd></div>` : ''}${po.grnNo ? `<div><dt>Penerimaan</dt><dd>${esc(po.grnNo)}</dd></div>` : ''}</dl>
     ${po.shortClosed ? `<div class="alert warn">${ic('alert')}Barang diterima kurang dari pesanan. PO ditutup tanpa backorder; buat PO baru bila sisa masih dibutuhkan.</div>` : ''}${po.note ? `<p class="note">${esc(po.note)}</p>` : ''}
     ${tbl(['Produk', ['Pesan', 'n'], ['Harga', 'n'], ['Diskon', 'n'], ['Subtotal', 'n'], ['Diterima', 'n']], po.lines.map(l => { const p = P(l.productId); const dev = lineDev(l); return `<tr><td>${esc(p.name)}</td><td class="n">${num(l.qty)} ${esc(l.uom)}</td><td class="n">${rp(l.price)}${Math.abs(dev) > S.settings.priceTolerance ? `<div class="sub bad-t">${Math.abs(dev).toFixed(0)}% ${dev > 0 ? 'di atas' : 'di bawah'} referensi</div>` : ''}</td><td class="n">${l.disc ? num(l.disc) + '%' : '–'}</td><td class="n">${rp(l.qty * l.price * (1 - (l.disc || 0) / 100))}</td><td class="n">${po.status === 'selesai' ? `${num(l.receivedBase / l.factor)} ${esc(l.uom)}` : '–'}</td></tr>`; }), { foot: `<tfoot><tr><td colspan="4">Total</td><td class="n">${rp(poTotal(po))}</td><td></td></tr></tfoot>` })}`;
   }, foot: () => {
@@ -3122,11 +3163,11 @@ function reportData() {
   if (r.tab === 'anomali') {
     const tol = S.settings.priceTolerance; const rows = [];
     S.movements.filter(m => m.type === 'IN' && m.ref !== 'SALDO-AWAL' && m.ts >= since && pm(m.productId)).forEach(m => { const p = P(m.productId); const dev = (m.cost - p.refPrice) / p.refPrice * 100; if (p.refPrice && Math.abs(dev) > tol) rows.push([fdt(m.ts), 'Penerimaan', m.ref || '–', p.name, m.cost, p.refPrice, dev, m.user]); });
-    S.pos.filter(po => po.status !== 'batal' && (po.orderedAt || po.createdAt) >= since).forEach(po => po.lines.forEach(l => { const p = P(l.productId); if (!prodMatch(p, r)) return; const dev = lineDev(l); if (Math.abs(dev) > tol) rows.push([fdt(po.orderedAt || po.createdAt), 'Purchase order', po.no, p.name, l.price * (1 - (l.disc || 0) / 100) / l.factor, p.refPrice, dev, po.createdBy]); }));
+    S.pos.filter(po => po.status !== 'batal' && (parseDate(transactionDateOf(po)) || po.createdAt) >= since).forEach(po => po.lines.forEach(l => { const p = P(l.productId); if (!prodMatch(p, r)) return; const dev = lineDev(l); if (Math.abs(dev) > tol) rows.push([fd(parseDate(transactionDateOf(po))), 'Purchase order', po.no, p.name, l.price * (1 - (l.disc || 0) / 100) / l.factor, p.refPrice, dev, po.createdBy]); }));
     return { head: ['Waktu', 'Sumber', 'Dokumen', 'Produk', 'Harga/satuan dasar', 'Referensi', 'Selisih %', 'Oleh'], num: [4, 5, 6], money: [4, 5], pct: [6], rows, note: `Transaksi dengan harga lebih dari ${tol}% di atas atau di bawah harga referensi. Eksekusi tidak diblokir; pemeriksaan dilakukan lewat laporan ini.` };
   }
-  const rows = S.scraps.filter(s => s.createdAt >= since && wf(s.warehouseId)).map(s => [fdt(s.createdAt), s.no, W(s.warehouseId).name, s.source === 'transit' ? 'Selisih transit' : 'Manual', s.reason, SC_ST[s.status][0], scrapVal(s)]);
-  return { head: ['Waktu', 'No.', 'Gudang', 'Sumber', 'Alasan', 'Status', 'Nilai'], num: [6], money: [6], rows, total: 6 };
+  const rows = S.scraps.filter(s => (parseDate(transactionDateOf(s)) || s.createdAt) >= since && wf(s.warehouseId)).map(s => [fd(parseDate(transactionDateOf(s))), s.no, W(s.warehouseId).name, s.source === 'transit' ? 'Selisih transit' : 'Manual', s.reason, SC_ST[s.status][0], scrapVal(s)]);
+  return { head: ['Tanggal transaksi', 'Kode transaksi', 'Gudang', 'Sumber', 'Alasan', 'Status', 'Nilai'], num: [6], money: [6], rows, total: 6 };
 }
 V.reports = () => {
   const r = F.rep; const d = reportData();
@@ -3167,12 +3208,12 @@ function docHtml(kind, o, copy) {
   if (kind === 'trf') {
     const rows = []; o.lines.forEach(l => { const p = P(l.productId); l.picks.forEach(pk => rows.push(`<tr><td>${esc(p.code)}</td><td>${esc(p.name)}</td><td>${esc(pk.batchNo)}</td><td>${fd(pk.expDate)}</td><td>${esc(pk.rack || '')}</td><td class="n">${num(pk.qty)} ${esc(p.baseUom)}</td><td class="n">${pk.received == null ? '' : num(pk.received)}</td></tr>`)); });
     return `<div class="doc"><div class="wm">COPY ${copy}</div><header><div><strong>${co}</strong><span>Surat jalan transfer antar gudang</span></div><div class="dno">${esc(o.no)}<span>Copy ${copy}, dicetak ${fdt(Date.now())}</span></div></header>
-    <div class="dmeta"><div><b>Dari</b>${esc(W(o.srcId).name)}</div><div><b>Ke</b>${esc(W(o.dstId).name)}</div><div><b>Tanggal</b>${fd(o.shippedAt || o.createdAt)}</div><div><b>Status</b>${esc(TRF_ST[o.status][0])}</div></div>
+    <div class="dmeta"><div><b>Dari</b>${esc(W(o.srcId).name)}</div><div><b>Ke</b>${esc(W(o.dstId).name)}</div><div><b>Tanggal transaksi</b>${fd(parseDate(transactionDateOf(o)))}</div><div><b>Status</b>${esc(TRF_ST[o.status][0])}</div></div>
     <table><thead><tr><th>Kode</th><th>Barang</th><th>Batch</th><th>Kedaluwarsa</th><th>Rak</th><th class="n">Dikirim</th><th class="n">Diterima</th></tr></thead><tbody>${rows.join('')}</tbody></table>
     <div class="sign"><div>Disiapkan</div><div>Pengemudi</div><div>Diterima</div></div></div>`;
   }
   return `<div class="doc"><div class="wm">COPY ${copy}</div><header><div><strong>${co}</strong><span>Purchase order</span></div><div class="dno">${esc(o.no)}<span>Copy ${copy}, dicetak ${fdt(Date.now())}</span></div></header>
-  <div class="dmeta"><div><b>Kepada</b>${esc(SU(o.supplierId).name)}</div><div><b>Kirim ke</b>${esc(central()?.name || '')}</div><div><b>Tanggal</b>${fd(o.orderedAt || o.createdAt)}</div><div><b>Status</b>${esc(PO_ST[o.status][0])}</div></div>
+  <div class="dmeta"><div><b>Kepada</b>${esc(SU(o.supplierId).name)}</div><div><b>Kirim ke</b>${esc(central()?.name || '')}</div><div><b>Tanggal transaksi</b>${fd(parseDate(transactionDateOf(o)))}</div><div><b>Status</b>${esc(PO_ST[o.status][0])}</div></div>
   <table><thead><tr><th>Kode</th><th>Barang</th><th class="n">Jumlah</th><th class="n">Harga</th><th class="n">Diskon</th><th class="n">Subtotal</th></tr></thead><tbody>${o.lines.map(l => { const p = P(l.productId); return `<tr><td>${esc(p.code)}</td><td>${esc(p.name)}</td><td class="n">${num(l.qty)} ${esc(l.uom)}</td><td class="n">${rp(l.price)}</td><td class="n">${l.disc ? num(l.disc) + '%' : ''}</td><td class="n">${rp(l.qty * l.price * (1 - (l.disc || 0) / 100))}</td></tr>`; }).join('')}</tbody><tfoot><tr><td colspan="5">Total</td><td class="n">${rp(poTotal(o))}</td></tr></tfoot></table>
   <div class="sign"><div>Purchasing</div><div>Disetujui</div></div></div>`;
 }
@@ -3210,9 +3251,9 @@ async function readSheetFile(file) { needXLSX(); const buf = await file.arrayBuf
 A.opnTemplate = d => {
   const o = byId(S.opnames, d.id); const w = W(o.warehouseId);
   const rows = [['Kode Baris', 'Rak', 'Kode Produk', 'Nama Produk', 'No. Batch', 'Satuan', 'Qty Fisik'], ...o.lines.map(l => { const p = P(l.productId); return [l.key, l.rack, p.code, p.name, l.batchNo, p.baseUom, null]; })];
-  const info = [['Stock opname blind count'], [`Sesi ${o.no}, ${w.name}${o.rack ? ', rak ' + o.rack : ''}`], [], ['Petunjuk'], ['1. Hitung fisik setiap baris di sheet "Hitung" dan isi kolom Qty Fisik dalam satuan yang tertera.'], ['2. Isi 0 bila barang tidak ditemukan. Jangan mengubah kolom lain, urutan, atau nama sheet.'], ['3. Unggah file ini kembali di sesi yang sama. Template dari sesi lain atau buatan sendiri akan ditolak.']];
+  const info = [['Stock opname blind count'], [`Sesi ${o.no}, tanggal transaksi ${fd(parseDate(transactionDateOf(o)))}, ${w.name}${o.rack ? ', rak ' + o.rack : ''}`], [], ['Petunjuk'], ['1. Hitung fisik setiap baris di sheet "Hitung" dan isi kolom Qty Fisik dalam satuan yang tertera.'], ['2. Isi 0 bila barang tidak ditemukan. Jangan mengubah kolom lain, urutan, atau nama sheet.'], ['3. Unggah file ini kembali di sesi yang sama. Template dari sesi lain atau buatan sendiri akan ditolak.']];
   o.uploads = o.uploads || 0; audit('DOWNLOAD_OPNAME_TEMPLATE', `/api/v1/opname/${o.no}/template`, null, { no: o.no }); save();
-  xlsxSave(`opname-${o.no}${o.rack ? '-' + o.rack : ''}.xlsx`, [['Hitung', rows, [11, 8, 12, 32, 14, 9, 12]], ['Petunjuk', info, [90]], ['_kunci', [['sesi', o.no], ['token', o.token], ['gudang', w.code]]]], ['_kunci']);
+  xlsxSave(`opname-${o.no}${o.rack ? '-' + o.rack : ''}.xlsx`, [['Hitung', rows, [11, 8, 12, 32, 14, 9, 12]], ['Petunjuk', info, [90]], ['_kunci', [['sesi', o.no], ['tanggal_transaksi', transactionDateOf(o)], ['token', o.token], ['gudang', w.code]]]], ['_kunci']);
 };
 async function opnUpload(input) {
   const o = byId(S.opnames, input.dataset.id); const file = input.files[0]; input.value = ''; if (!file) return;
@@ -3406,3 +3447,4 @@ init();
 </script>
 </body>
 </html>
+
