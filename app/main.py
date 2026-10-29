@@ -462,3 +462,8 @@ def index():
 def manufacturing_script():
     return FileResponse(os.path.join(STATIC_DIR, "manufacturing.js"), media_type="application/javascript",
                         headers={"Cache-Control": "no-cache"})
+
+@app.get("/static/product-picker.js")
+def product_picker_script():
+    return FileResponse(os.path.join(STATIC_DIR, "product-picker.js"), media_type="application/javascript",
+                        headers={"Cache-Control": "no-cache"})

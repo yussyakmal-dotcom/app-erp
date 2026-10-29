@@ -70,6 +70,18 @@ nav a em{font-style:normal;font-size:11px;font-weight:700;background:#E2A841;col
 input,select,button{font:inherit;color:inherit}
 input,select{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:7px 9px;min-height:36px;width:100%;min-width:0}
 input:disabled,select:disabled{opacity:.6}
+.product-picker,.fld>.product-picker{display:block;width:100%;min-width:0;color:var(--ink);font:15px/1.5 var(--font)}
+.product-picker input[role=combobox]{padding-right:26px;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 14px) 50%,calc(100% - 10px) 50%;background-size:4px 4px;background-repeat:no-repeat}
+.product-picker-popup{position:fixed;z-index:75;display:flex;flex-direction:column;overflow:hidden;background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 24px rgba(10,30,26,.2);font:14px/1.5 var(--font);color:var(--ink)}
+.product-picker-count{padding:8px 10px;color:var(--muted);font-size:12px;border-bottom:1px solid var(--line2);flex:none}
+.product-picker-popup [role=listbox]{overflow:auto;overscroll-behavior:contain;min-height:0}
+.product-picker-popup [role=option]{padding:9px 10px;min-height:40px;cursor:pointer;overflow-wrap:anywhere}
+.product-picker-popup [role=option]:hover,.product-picker-popup [aria-selected=true]{background:var(--pine-soft);color:var(--ink)}
+.product-picker-actions{display:flex;flex-wrap:wrap;gap:6px;padding:6px;border-top:1px solid var(--line2);flex:none}
+.product-picker-actions:empty{display:none}
+.product-picker-actions button{background:var(--surface2);border:1px solid var(--line);border-radius:5px;padding:5px 8px;min-height:34px;font-size:12px;cursor:pointer}
+.product-picker-actions button:disabled{opacity:.4;cursor:default}
+@media print{.product-picker-popup{display:none}}
 input.n{text-align:right}input.sm{max-width:110px}
 .btn{display:inline-flex;align-items:center;gap:6px;justify-content:center;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:6px;padding:7px 13px;min-height:36px;font-weight:600;font-size:14px;cursor:pointer;white-space:nowrap}
 .btn:hover{border-color:var(--muted)}.btn:disabled{opacity:.45;cursor:not-allowed}
@@ -1574,8 +1586,11 @@ function commit(msg) { save(); if (msg) toast(msg); render(); }
 /* ---------- render ---------- */
 function keepFocus(fn) {
   const a = document.activeElement; const key = a && a !== document.body ? (a.dataset?.bind || a.id) : null; const sel = a && 'selectionStart' in a ? (() => { try { return a.selectionStart; } catch (e) { return null; } })() : null;
-  fn();
-  if (key) { const el = document.querySelector(`[data-bind="${CSS.escape(key)}"]`) || document.getElementById(key); if (el) { el.focus({ preventScroll: true }); try { if (sel != null) el.setSelectionRange(sel, sel); } catch (e) { } } }
+  const picker = ProductPicker.beforeRender();
+  try {
+    fn();
+    if (key) { const el = document.querySelector(`[data-bind="${CSS.escape(key)}"]`) || document.getElementById(key); if (el) { el.focus({ preventScroll: true }); try { if (sel != null) el.setSelectionRange(sel, sel); } catch (e) { } } }
+  } finally { ProductPicker.afterRender(picker); }
 }
 function render() {
   sweep();
@@ -1588,6 +1603,7 @@ function render() {
 }
 function openModal(o) { M = o; keepFocus(drawModal); setTimeout(() => { const f = $('#modal .mbody input:not([type=hidden]), #modal .mbody select'); if (f && !document.activeElement?.closest('#modal')) f.focus(); }, 20); }
 function drawModal() {
+  ProductPicker.close();
   const m = $('#modal');
   if (!M) { m.hidden = true; m.innerHTML = ''; return; }
   const sc = m.querySelector('.mbody')?.scrollTop || 0;
@@ -2011,7 +2027,7 @@ V.inbound = () => {
   const rows = d.lines.map((l, i) => {
     const p = P(l.productId);
     return `<tr>
-      <td><select aria-label="Produk baris ${i + 1}" data-bind="inb.lines.${i}.productId" data-hook="inbProd" data-i="${i}" data-rr>${opt('', 'Pilih produk', l.productId)}${actP().map(x => opt(x.id, `${x.code} ${x.name}`, l.productId)).join('')}</select></td>
+      <td>${productPicker(`inb.lines.${i}.productId`, l.productId, actP(), {extra: `data-hook="inbProd" data-i="${i}" data-rr`})}</td>
       <td><select aria-label="Satuan" data-bind="inb.lines.${i}.uom" data-hook="inbUom" data-i="${i}" data-rr ${p ? '' : 'disabled'}>${p ? uoms(p).map(u => opt(u.name, u.factor === 1 ? u.name : `${u.name} (${num(u.factor)} ${p.baseUom})`, l.uom)).join('') : '<option>–</option>'}</select></td>
       <td><input aria-label="Jumlah" class="n" type="number" min="0" step="any" data-bind="inb.lines.${i}.qty" value="${esc(l.qty)}"></td>
       <td><input aria-label="Harga per satuan" class="n" type="number" min="0" step="any" data-bind="inb.lines.${i}.cost" value="${esc(l.cost)}"></td>
@@ -2080,7 +2096,7 @@ function trfForm() {
       detail = `<div class="avl">Tersedia di ${esc(src.name)}: <strong>${num(av)} ${esc(p.baseUom)}</strong>${base ? `, transfer ${num(base)} ${esc(p.baseUom)}` : ''}</div>` + detail;
     }
     return `<div class="tline"><div class="tlh">
-      ${fld('Produk', `<select data-bind="trf.lines.${i}.productId" data-hook="trfProd" data-i="${i}" data-rr>${opt('', src ? 'Pilih produk' : 'Pilih gudang asal dulu', l.productId)}${prods.map(x => opt(x.id, `${x.code} ${x.name}`, l.productId)).join('')}</select>`, '', 'grow')}
+      ${fld('Produk', productPicker(`trf.lines.${i}.productId`, l.productId, prods, {extra: `data-hook="trfProd" data-i="${i}" data-rr`, disabled: !src, placeholder: src ? 'Ketik nama atau kode SKU…' : 'Pilih gudang asal dulu'}), '', 'grow')}
       ${fld('Jumlah', `<input class="n" type="number" min="0" step="any" data-bind="trf.lines.${i}.uomQty" data-rr value="${esc(l.uomQty)}">`)}
       ${fld('Satuan', `<select data-bind="trf.lines.${i}.uom" data-rr ${p ? '' : 'disabled'}>${p ? uoms(p).map(u => opt(u.name, u.name, l.uom)).join('') : '<option>–</option>'}</select>`)}
       <label class="chk"><input type="checkbox" data-bind="trf.lines.${i}.manual" data-rr ${l.manual ? 'checked' : ''} ${p ? '' : 'disabled'}> Pilih batch manual</label>
@@ -2180,7 +2196,7 @@ V.usage = () => {
   <section class="panel"><header class="ph"><h3>Catat pemakaian</h3><span class="muted">Bahan keluar untuk produksi atau penjualan</span></header>
   ${!can('usage') ? `<div class="alert info">${ic('info')}Peran ${esc(ROLES[cur().role].label)} tidak mencatat pemakaian.</div>` : `
   <div class="formrow">${fld('Gudang', whSel('use.warehouseId', f.warehouseId, ws, { rr: 1, blank: 'Pilih gudang' }))}
-  ${fld('Produk', `<select data-bind="use.productId" data-hook="useProd" data-rr>${opt('', 'Pilih produk', f.productId)}${prods.map(x => opt(x.id, `${x.code} ${x.name}`, f.productId)).join('')}</select>`, '', 'grow')}</div>
+  ${fld('Produk', productPicker('use.productId', f.productId, prods, {extra: 'data-hook="useProd" data-rr'}), '', 'grow')}</div>
   <div class="formrow">${fld('Jumlah', `<input class="n" type="number" min="0" step="any" data-bind="use.uomQty" data-rr value="${esc(f.uomQty)}">`)}
   ${fld('Satuan', `<select data-bind="use.uom" data-rr ${p ? '' : 'disabled'}>${p ? uoms(p).map(u => opt(u.name, u.factor === 1 ? u.name : `${u.name} (${num(u.factor)} ${p.baseUom})`, f.uom)).join('') : '<option>–</option>'}</select>`)}
   ${fld('Keterangan', `<input data-bind="use.note" value="${esc(f.note)}" maxlength="120" placeholder="Contoh: produksi shift pagi">`, '', 'grow')}</div>
@@ -2703,10 +2719,7 @@ function bomModalForm() {
     const ingUoms = ingP ? uoms(ingP) : [];
     return `<tr>
       <td>
-        <select data-bind="bomForm.lines.${i}.productId" data-hook="bomLineProd" data-i="${i}" data-rr>
-          ${opt('', 'Pilih bahan baku', l.productId)}
-          ${actP().filter(x => x.id !== +f.productId).map(x => opt(x.id, `${x.code} ${x.name}`, l.productId)).join('')}
-        </select>
+        ${productPicker(`bomForm.lines.${i}.productId`, l.productId, actP().filter(x => x.id !== +f.productId), {extra: `data-hook="bomLineProd" data-i="${i}" data-rr`, label: `Bahan baku baris ${i + 1}`})}
       </td>
       <td>
         <input class="n" type="number" min="0.0001" step="any" data-bind="bomForm.lines.${i}.qty" value="${esc(l.qty)}">
@@ -2728,7 +2741,7 @@ function bomModalForm() {
       ${fld('Nama Resep', `<input data-bind="bomForm.name" value="${esc(f.name)}" maxlength="150" placeholder="contoh: Resep Roti Tawar Gandum">`, '', 'grow')}
     </div>
     <div class="formrow">
-      ${fld('Produk Jadi yang Dihasilkan', `<select data-bind="bomForm.productId" data-hook="bomProd" data-rr>${actP().map(x => opt(x.id, `${x.code} ${x.name}`, f.productId)).join('')}</select>`, '', 'grow')}
+      ${fld('Produk Jadi yang Dihasilkan', productPicker('bomForm.productId', f.productId, actP(), {extra: 'data-hook="bomProd" data-rr', label: 'Produk jadi yang dihasilkan', allowEmpty: false}), '', 'grow')}
       ${fld('Dapur Khusus (Opsional)', `<select data-bind="bomForm.kitchenId">${opt('', '– Semua Dapur –', f.kitchenId)}${actKT().map(kt => opt(kt.id, kt.name, f.kitchenId)).join('')}</select>`)}
     </div>
     <div class="formrow">
@@ -2765,7 +2778,7 @@ A.newScrap = () => {
     const f = F.scr; const bs = S.batches.filter(b => b.warehouseId === +f.warehouseId && avail(b) > 1e-9).sort((a, b) => a.expDate - b.expDate);
     const b = byId(S.batches, f.batchId); const p = b && P(b.productId);
     return `<div class="formrow">${fld('Tanggal transaksi', `<input type="date" data-bind="scr.transactionDate" value="${esc(f.transactionDate)}" required>`, 'Nomor BS dibuat otomatis saat disimpan')}${fld('Gudang', whSel('scr.warehouseId', f.warehouseId, actW().filter(w => my.includes(w.id)), { rr: 1 }))}</div>
-    ${fld('Batch', `<select data-bind="scr.batchId" data-rr>${opt('', 'Pilih batch', f.batchId)}${bs.map(x => { const pp = P(x.productId); const dl = daysLeft(x.expDate); return opt(x.id, `${pp.name}, ${x.batchNo}, ${dl < 0 ? 'kedaluwarsa' : 'exp ' + fd(x.expDate)}, tersedia ${num(avail(x))} ${pp.baseUom}`, f.batchId); }).join('')}</select>`, 'Diurutkan dari yang paling cepat kedaluwarsa')}
+    ${fld('Batch', ProductPicker.field('scr.batchId', f.batchId, bs.map(x => { const pp = P(x.productId); const dl = daysLeft(x.expDate); return [x.id, `${pp.code} · ${pp.name}, ${x.batchNo}, ${dl < 0 ? 'kedaluwarsa' : 'exp ' + fd(x.expDate)}, tersedia ${num(avail(x))} ${pp.baseUom}`]; }), {extra: 'data-rr', label: 'Batch produk', placeholder: 'Ketik nama, kode SKU, atau batch…'}), 'Diurutkan dari yang paling cepat kedaluwarsa')}
     <div class="formrow">${fld('Jumlah' + (p ? ` (${p.baseUom})` : ''), `<input class="n" type="number" min="0" step="any" data-bind="scr.qty" value="${esc(f.qty)}">`, b ? `Maks. ${num(avail(b))}, nilai ${rp((+f.qty || 0) * b.cost)}` : '')}
     ${fld('Alasan', `<select data-bind="scr.reason">${['Kedaluwarsa', 'Rusak', 'Terkontaminasi', 'Hilang', 'Lainnya'].map(r => opt(r, r, f.reason)).join('')}</select>`)}</div>`;
   }, foot: () => `<button type="button" class="btn" data-act="closeModal">Batal</button>${btn('Ajukan ke Approver', 'scrSave', {}, { k: 'pri', perm: 'scrap.create' })}` });
@@ -2878,7 +2891,7 @@ function poFormOriginal() {
   const rows = f.lines.map((l, i) => {
     const p = P(l.productId); const sub = (+l.qty || 0) * (+l.price || 0) * (1 - (+l.disc || 0) / 100); total += sub;
     const dev = p ? lineDev({ ...l, factor: uomF(p, l.uom) }) : 0;
-    return `<tr><td><select aria-label="Produk" data-bind="po.lines.${i}.productId" data-hook="poProd" data-i="${i}" data-rr>${opt('', 'Pilih produk', l.productId)}${prods.map(x => opt(x.id, `${x.code} ${x.name}${x.supplierId === sid ? '' : ' (supplier lain)'}`, l.productId)).join('')}</select></td>
+    return `<tr><td>${productPicker(`po.lines.${i}.productId`, l.productId, prods, {extra: `data-hook="poProd" data-i="${i}" data-rr`, format: x => `${x.code} · ${x.name}${x.supplierId === sid ? '' : ' (supplier lain)'}`})}</td>
     <td><select aria-label="Satuan" data-bind="po.lines.${i}.uom" data-hook="poUom" data-i="${i}" data-rr ${p ? '' : 'disabled'}>${p ? uoms(p).map(u => opt(u.name, u.factor === 1 ? u.name : `${u.name} (${num(u.factor)} ${p.baseUom})`, l.uom)).join('') : '<option>–</option>'}</select></td>
     <td><input aria-label="Jumlah" class="n" type="number" min="0" step="any" data-bind="po.lines.${i}.qty" data-rr value="${esc(l.qty)}"></td>
     <td><input aria-label="Harga" class="n" type="number" min="0" step="any" data-bind="po.lines.${i}.price" data-rr value="${esc(l.price)}">${l.src ? `<div class="sub">Terisi dari ${esc(l.src)}</div>` : ''}${Math.abs(dev) > S.settings.priceTolerance ? `<div class="sub bad-t">${Math.abs(dev).toFixed(0)}% ${dev > 0 ? 'di atas' : 'di bawah'} referensi</div>` : ''}</td>
@@ -3116,7 +3129,7 @@ V.reports = () => {
   const foot = d.total != null && d.rows.length ? `<tfoot><tr><td colspan="${d.total}">Total</td><td class="n">${rp(d.rows.reduce((a, x) => a + x[d.total], 0))}</td>${d.head.length - d.total - 1 > 0 ? `<td colspan="${d.head.length - d.total - 1}"></td>` : ''}</tr></tfoot>` : '';
   return `<div class="toolbar">${seg('rep.tab', r.tab, [['valuasi', 'Valuasi stok'], ['kartu', 'Kartu stok'], ['hpp', 'HPP pemakaian'], ['anomali', 'Anomali harga'], ['scrap', 'Scrap & selisih']])}</div>
   <div class="toolbar">${fld('Gudang', whSel('rep.wid', r.wid, S.warehouses, { rr: 1, blank: 'Semua gudang' }))}
-  ${r.tab === 'kartu' ? fld('Produk', `<select data-bind="rep.pid" data-rr>${opt('', 'Semua produk', r.pid)}${S.products.map(p => opt(p.id, p.name, r.pid)).join('')}</select>`) : ''}
+  ${r.tab === 'kartu' ? fld('Produk', productPicker('rep.pid', r.pid, S.products, {extra: 'data-rr', empty: 'Semua produk', placeholder: 'Semua produk — ketik untuk mencari'})) : ''}
   ${r.tab !== 'valuasi' ? fld('Periode', `<select data-bind="rep.days" data-rr>${[['7', '7 hari'], ['30', '30 hari'], ['90', '90 hari'], ['365', '1 tahun']].map(([v, l]) => opt(v, l, r.days)).join('')}</select>`) : ''}
   ${['valuasi', 'hpp'].includes(r.tab) ? groupSel('rep.group', r.group) : ''}
   <div class="sp"></div>${btn('Unduh Excel', 'repExport', {}, { perm: 'report' })}</div>
@@ -3387,6 +3400,7 @@ function init() {
 }
 
 </script>
+<script src="/static/product-picker.js"></script>
 <script src="/static/manufacturing.js"></script>
 <script>init();</script>
 </body>

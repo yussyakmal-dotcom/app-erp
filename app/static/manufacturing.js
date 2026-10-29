@@ -66,7 +66,9 @@ PAGES.manufacturing = ['Manufaktur & Packing','Operasional'];
 PAGES.mfgconfig = ['Konfigurasi produksi','Master data'];
 PAGE_ICON.mfgconfig='recipe';
 const mfInput=(path,value,type='text',extra='')=>`<input type="${type}" data-bind="${path}" value="${esc(value??'')}" ${extra}>`;
-const mfSelect=(path,value,rows,extra='')=>`<select data-bind="${path}" ${extra}>${opt('','Pilih',value)}${rows.map(([id,label])=>opt(id,label,value)).join('')}</select>`;
+const mfSelect=(path,value,rows,extra='')=>path.endsWith('.productId')
+  ? ProductPicker.field(path,value,rows,{extra})
+  : `<select data-bind="${path}" ${extra}>${opt('','Pilih',value)}${rows.map(([id,label])=>opt(id,label,value)).join('')}</select>`;
 const mfProducts=()=>actP().map(p=>[p.id,`${p.code} · ${p.name} (${p.baseUom})`]);
 const mfKitchenSelect=(path,value)=>mfSelect(path,value,actKT().map(k=>[k.id,k.name]));
 const mfPlanSelect=(path,value)=>mfSelect(path,value,mfState().plans.map(p=>[p.id,`${p.no} · kirim ${p.deliveryDate}`]));

@@ -33,6 +33,18 @@ Implementasi pada aplikasi inventori yang ada, mengacu pada [PRD](PRD_Manufaktur
 
 RO/SO pada versi ini adalah input baru dalam aplikasi ini. Belum ada sinkronisasi ke aplikasi sales lain, POS, atau repository ERP lain. Kolom referensi eksternal adalah penanda manual, bukan mekanisme sinkronisasi.
 
+## Pencarian produk di seluruh form
+
+Semua pemilihan produk memakai kolom yang bisa diketik: PO, penerimaan, transfer, pemakaian, produk hasil/komponen BOM, RO/SO, MO, permintaan bahan, pengiriman dapur ke Packing, minimum gudang, dan filter kartu stok. Pemilihan batch untuk scrap juga bisa dicari dengan nama produk, SKU, atau nomor batch.
+
+- Ketik sebagian nama atau kode SKU, misalnya `coklat`. Pencarian tidak membedakan huruf besar/kecil; beberapa kata mempersempit hasil tanpa harus mengikuti urutan nama.
+- Klik hasil atau gunakan panah atas/bawah lalu Enter. Kode SKU ikut ditampilkan untuk membedakan produk dengan nama sama. Data transaksi tetap menyimpan ID produk.
+- Daftar menampilkan maksimal 50 hasil per halaman, dengan jumlah hasil serta tombol Sebelumnya/Berikutnya. Pencarian mencakup seluruh pilihan yang memenuhi syarat pada form, termasuk produk di akhir katalog 5.000 SKU.
+- Teks pencarian belum menjadi pilihan sampai petugas memilih hasil. Jika pencarian dibatalkan atau kolom ditinggalkan, pilihan sebelumnya ditampilkan kembali. Escape menutup daftar lebih dulu, tanpa menutup form. Tombol Kosongkan pilihan tersedia pada kolom yang boleh kosong; kartu stok menyediakan Semua produk.
+- Pembatasan form tetap berlaku: produk aktif untuk transaksi, stok asal untuk transfer/pemakaian, komponen BOM selain SKU hasil, dan jenis produksi yang sesuai untuk MO. Riwayat kartu stok tetap dapat mencari produk nonaktif.
+
+Komponen bersama ada di `app/static/product-picker.js`. Pencarian berjalan pada katalog yang sudah dimuat aplikasi; hanya satu halaman hasil dibuat menjadi elemen layar. Tidak menambah pustaka eksternal atau mengubah struktur database. Form produk baru wajib memakai `productPicker` atau `ProductPicker.field`; `mfSelect` otomatis menggunakannya untuk isian `productId`.
+
 ## Pilihan teknis yang terlihat oleh petugas
 
 - **Saran bahan:** kebutuhan WO + minimum − stok bebas dari reservasi aktif, paling kecil nol. Stok fisik, reservasi, dan barang dalam perjalanan ditampilkan terpisah. Barang dalam perjalanan belum otomatis mengurangi saran. Jumlah akhir tetap pilihan petugas. Ini penyelesaian awal atas detail saran yang masih terbuka pada PRD, bukan larangan tambahan.
