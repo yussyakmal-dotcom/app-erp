@@ -274,6 +274,7 @@ nav a[aria-current]{background:var(--nav-cur);color:var(--nav-cur-ink)}
 @media (max-width:820px){.tti{display:none}.tpanel{right:0}}
 
 .tpwide .tp{max-width:520px}
+@media (max-width:600px){.app-badge{display:none}.tt{min-width:0;flex:1}.tt h1{font-size:19px}.top{gap:8px}.toolbar>.seg{max-width:100%;flex-wrap:wrap}.seg button{padding:6px 8px}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 </head>
@@ -286,7 +287,7 @@ nav a[aria-current]{background:var(--nav-cur);color:var(--nav-cur-ink)}
 <script>
 'use strict';
 /* ================= CORE ================= */
-const APP_VERSION = 'v2.3';
+const APP_VERSION = 'v2.4-manufacturing';
 const DAY = 864e5, HOUR = 36e5, KEY = 'inventori-mvp-v1';
 let S = null;
 class UserError extends Error {}
@@ -353,7 +354,7 @@ function catInherit(id, key) { const ch = catChain(id); for (let i = ch.length -
 const leafCats = () => S.categories.filter(c => c.level === 3 && catChain(c.id).every(x => x.isActive)).sort((a, b) => catPath(a.id).localeCompare(catPath(b.id)));
 const ttlOf = p => (p.overrideTtl != null && p.overrideTtl !== '') ? +p.overrideTtl : (catInherit(p.categoryId, 'ttlHours')?.v ?? 24);
 const thrOf = p => catInherit(p.categoryId, 'expiryDays')?.v ?? S.settings.expiryDays;
-const minOf = (p, w) => +(w.isCentral ? p.minCentral : p.minBranch) || 0;
+const minOf = (p, w) => +(p.minimumByWarehouse?.[w.id] ?? (w.isCentral ? p.minCentral : p.minBranch)) || 0;
 
 /* ================= ROLES ================= */
 const ROLES = {
@@ -377,7 +378,7 @@ function audit(action, endpoint, before, after, sysUser) {
 }
 
 /* ================= STOCK HELPERS ================= */
-const resQty = bid => S.reservations.filter(r => r.batchId === bid).reduce((a, r) => a + r.qty, 0);
+const resQty = bid => S.reservations.filter(r => r.batchId === bid && r.expiresAt > Date.now()).reduce((a, r) => a + r.qty, 0);
 const avail = b => Math.max(0, r4(b.qty - resQty(b.id)));
 const fifoSort = (a, b) => a.inboundAt - b.inboundAt || a.id - b.id;
 const batchesOf = (pid, wid) => S.batches.filter(b => b.productId === +pid && b.warehouseId === +wid && b.qty > 1e-9).sort(fifoSort);
@@ -447,14 +448,14 @@ function relocateBatch(d) {
 }
 function lowStock() { const out = []; for (const w of actW()) for (const p of actP()) { const q = stockQ(p.id, w.id); const m = minOf(p, w); if (m > 0 && q < m) out.push({ p, w, q, m }); } return out; }
 function expiring() {
-  return S.batches.filter(b => b.qty > 1e-9 && W(b.warehouseId)?.isActive && P(b.productId))
+  return S.batches.filter(b => b.qty > 1e-9 && b.expDate && W(b.warehouseId)?.isActive && P(b.productId))
     .map(b => ({ b, p: P(b.productId), d: daysLeft(b.expDate), thr: thrOf(P(b.productId)) }))
     .filter(x => x.d <= x.thr).sort((a, b) => a.d - b.d);
 }
 const releaseRes = tid => { S.reservations = S.reservations.filter(r => r.transferId !== tid); };
 function sweep() {
   let ch = false; const now = Date.now();
-  for (const t of S.transfers) if (t.status === 'draft' && t.expiresAt <= now) {
+  for (const t of S.transfers) if (!t.manufacturingVersion && t.status === 'draft' && t.expiresAt <= now) {
     const before = clone(t); releaseRes(t.id); t.status = 'kedaluwarsa'; t.closedAt = now;
     audit('TRANSFER_RESERVATION_EXPIRED', `/api/v1/transfer/${t.no}/expire`, before, t, 'system'); ch = true;
   }
@@ -1059,12 +1060,12 @@ function recordUsage({ warehouseId, productId, uom, uomQty, note }) {
 
 /* ================= INBOUND ================= */
 function inboundCheck(d) {
-  const errors = [], warnings = []; const c = central();
+  const errors = [], warnings = []; const c = W(d.warehouseId || central()?.id);
   if (!parseDate(String(d.transactionDate || '').trim())) errors.push('Tanggal transaksi wajib diisi.');
-  if (!c) errors.push('Belum ada Gudang Central aktif. Penerimaan wajib melalui Gudang Central.');
-  else if (!myWhIds().includes(c.id)) errors.push('Penerimaan barang hanya dilakukan staf Gudang Central.');
+  if (!c?.isActive || (!c.isCentral && c.id !== S.manufacturing?.settings.packingWarehouseId)) errors.push('Pilih Gudang Central atau Packing aktif.');
+  else if (!myWhIds().includes(c.id)) errors.push('Gudang penerimaan di luar lingkup akun.');
   if (!d.supplierId || !SU(d.supplierId)?.isActive) errors.push('Pilih supplier.');
-  if (d.poId) { const po = byId(S.pos, d.poId); if (!po || po.status !== 'dipesan') errors.push('PO tidak dalam status dipesan.'); else if (po.supplierId !== +d.supplierId) errors.push('Supplier tidak sesuai dengan PO.'); }
+  if (d.poId) { const po = byId(S.pos, d.poId); if (!po || po.status !== 'dipesan') errors.push('PO tidak dalam status dipesan.'); else if (po.supplierId !== +d.supplierId) errors.push('Supplier tidak sesuai dengan PO.'); else if ((po.warehouseId || central()?.id) !== c?.id) errors.push('Gudang penerimaan tidak sesuai tujuan PO.'); }
   const lines = d.lines.filter(l => l.productId);
   if (!lines.length) errors.push('Tambahkan minimal satu barang.');
   const keys = new Set();
@@ -1091,8 +1092,8 @@ function inboundCheck(d) {
 function doInbound(d) {
   need('inbound'); const { errors, lines } = inboundCheck(d); if (errors.length) fail(errors[0]);
   const transactionDate = validTransactionDate(d.transactionDate);
-  const c = central(); const no = transactionNo('RCV', transactionDate);
-  const rec = { id: nid('inbounds'), no, transactionDate, supplierId: +d.supplierId, poId: d.poId ? +d.poId : null, docRef: d.docRef || '', ts: Date.now(), user: cur().username, lines: [] };
+  const c = W(d.warehouseId || central()?.id); const no = transactionNo('RCV', transactionDate);
+  const rec = { id: nid('inbounds'), no, transactionDate, warehouseId: c.id, supplierId: +d.supplierId, poId: d.poId ? +d.poId : null, docRef: d.docRef || '', ts: Date.now(), user: cur().username, lines: [] };
   for (const l of lines) {
     const p = P(l.productId); const f = uomF(p, l.uom); const qb = r4(+l.qty * f); const cb = r4(+l.cost / f);
     const b = { id: nid('batches'), productId: p.id, warehouseId: c.id, batchNo: String(l.batchNo).trim(), expDate: parseDate(l.exp), qty: qb, cost: cb, rack: String(l.rack || '').trim().toUpperCase(), inboundAt: Date.now(), createdAt: Date.now() };
@@ -1119,7 +1120,7 @@ function lastPrice(pid, uom) {
   const p = P(pid); return { price: Math.round(p.refPrice * uomF(p, uom)), src: 'harga referensi' };
 }
 function savePO(d) {
-  need('po'); const sup = SU(d.supplierId); if (!sup || !sup.isActive) fail('Pilih supplier yang aktif.');
+  need('po'); const destId = +(d.warehouseId || central()?.id); if (!W(destId)?.isActive || (!W(destId).isCentral && destId !== S.manufacturing?.settings.packingWarehouseId)) fail('Pilih tujuan PO Central atau Packing.'); const sup = SU(d.supplierId); if (!sup || !sup.isActive) fail('Pilih supplier yang aktif.');
   const lines = d.lines.filter(l => l.productId); if (!lines.length) fail('Tambahkan minimal satu barang.');
   const out = lines.map((l, i) => {
     const p = P(l.productId); if (!p) fail('Produk tidak ditemukan.');
@@ -1131,11 +1132,11 @@ function savePO(d) {
   });
   if (d.id) {
     const po = byId(S.pos, d.id); if (po.status !== 'draft') fail('Hanya PO draft yang bisa diubah.');
-    const before = clone(po); Object.assign(po, { supplierId: sup.id, note: d.note || '', lines: out });
+    const before = clone(po); Object.assign(po, { supplierId: sup.id, warehouseId: destId, note: d.note || '', lines: out });
     audit('UPDATE_PO', `/api/v1/po/${po.no}`, before, po); return po;
   }
   const transactionDate = validTransactionDate(d.transactionDate || isoDate(Date.now()));
-  const po = { id: nid('pos'), no: transactionNo('PO', transactionDate), transactionDate, supplierId: sup.id, status: 'draft', createdAt: Date.now(), orderedAt: null, closedAt: null, createdBy: cur().username, note: d.note || '', printCount: 0, shortClosed: false, lines: out };
+  const po = { id: nid('pos'), no: transactionNo('PO', transactionDate), transactionDate, supplierId: sup.id, warehouseId: destId, status: 'draft', createdAt: Date.now(), orderedAt: null, closedAt: null, createdBy: cur().username, note: d.note || '', printCount: 0, shortClosed: false, lines: out };
   S.pos.push(po); audit('CREATE_PO', '/api/v1/po', null, po); return po;
 }
 function orderPO(id) { need('po'); const po = byId(S.pos, id); if (po.status !== 'draft') fail('Hanya draft yang bisa dikirim.'); const b = clone(po); po.status = 'dipesan'; po.orderedAt = Date.now(); audit('ORDER_PO', `/api/v1/po/${po.no}/order`, b, po); }
@@ -1266,7 +1267,7 @@ function saveWarehouse(d) {
   need('master'); const code = String(d.code || '').trim(), name = String(d.name || '').trim();
   if (!code || code.length > 50) fail('Kode gudang wajib, maks. 50 karakter.'); if (!name || name.length > 100) fail('Nama gudang wajib, maks. 100 karakter.');
   if (S.warehouses.some(w => w.code.toLowerCase() === code.toLowerCase() && w.id !== +d.id)) fail(`Kode ${code} sudah dipakai.`);
-  const isCentral = !!d.isCentral; if (isCentral && S.warehouses.some(w => w.isCentral && w.isActive && w.id !== +d.id)) fail('Sudah ada Gudang Central aktif. Sistem hanya mengizinkan satu titik inbound.');
+  const isCentral = !!d.isCentral; if (isCentral && S.warehouses.some(w => w.isCentral && w.isActive && w.id !== +d.id)) fail('Sudah ada Gudang Central aktif. Sistem hanya mengizinkan satu Gudang Central.');
   if (d.id) { const w = W(d.id); const b = clone(w); Object.assign(w, { code, name, isCentral }); audit('UPDATE_WAREHOUSE', `/api/v1/warehouses/${w.id}`, b, w); return w; }
   const w = { id: nid('warehouses'), code, name, isCentral, isActive: true }; S.warehouses.push(w); audit('CREATE_WAREHOUSE', '/api/v1/warehouses', null, w); return w;
 }
@@ -1347,72 +1348,6 @@ function migrate() {
   if (!S.boms) { S.boms = []; ch = true; }
   if (!S.productions) { S.productions = []; ch = true; }
   if (!S.racks) { S.racks = []; ch = true; }
-  if (!S.warehouses.some(w => w.code === 'GD-BKR')) {
-    const addW = (code, name) => { const w = { id: nid('warehouses'), code, name, isCentral: false, isActive: true }; S.warehouses.push(w); return w; };
-    const wBkr = addW('GD-BKR', 'Gudang Dapur Bakery');
-    const wHot = addW('GD-HOT', 'Gudang Dapur Hot Kitchen');
-    const wPck = addW('GD-PCK', 'Gudang Packing & Sortir');
-    const addR = (wid, code, name) => { S.racks.push({ id: nid('racks'), warehouseId: wid, code, name, isActive: true }); };
-    addR(wBkr.id, 'BKR-A', 'Bahan Baku Bakery'); addR(wBkr.id, 'BKR-OUT', 'Hasil Baking');
-    addR(wHot.id, 'HOT-A', 'Bahan Baku Masak'); addR(wHot.id, 'HOT-OUT', 'Hasil Olahan');
-    addR(wPck.id, 'PCK-IN', 'Barang Masuk Packing'); addR(wPck.id, 'PCK-RDY', 'Siap Kirim Toko');
-    if (!S.kitchens.some(k => k.code === 'DPR-BKR')) {
-      S.kitchens.push({ id: nid('kitchens'), code: 'DPR-BKR', name: 'Dapur Bakery & Pastry', warehouseId: wBkr.id, isActive: true });
-      S.kitchens.push({ id: nid('kitchens'), code: 'DPR-HOT', name: 'Dapur Hot Kitchen', warehouseId: wHot.id, isActive: true });
-    }
-    // Check finished products P-011 and P-012
-    let p11 = S.products.find(p => p.code === 'P-011');
-    if (!p11) {
-      const cKer = (S.categories || []).find(c => c.name.toLowerCase() === 'tepung') || (S.categories || []).find(c => c.level === 3);
-      p11 = { id: nid('products'), code: 'P-011', name: 'Roti Tawar Gandum', categoryId: cKer?.id || S.categories?.[0]?.id || 1, typeId: S.types?.[1]?.id || S.types?.[0]?.id || 2, brandId: null, baseUom: 'loaf', uoms: [{ name: 'pack', factor: 1 }, { name: 'dus', factor: 10 }], poUom: 'dus', minCentral: 30, minBranch: 10, refPrice: 18000, supplierId: null, overrideTtl: 5 * 24, isActive: true };
-      S.products.push(p11);
-    }
-    let p12 = S.products.find(p => p.code === 'P-012');
-    if (!p12) {
-      const cPro = (S.categories || []).find(c => c.name.toLowerCase().includes('daging')) || (S.categories || []).find(c => c.level === 3);
-      p12 = { id: nid('products'), code: 'P-012', name: 'Patty Daging Burger', categoryId: cPro?.id || S.categories?.[0]?.id || 1, typeId: S.types?.[1]?.id || S.types?.[0]?.id || 2, brandId: null, baseUom: 'pcs', uoms: [{ name: 'pack', factor: 10 }, { name: 'box', factor: 50 }], poUom: 'box', minCentral: 50, minBranch: 15, refPrice: 12000, supplierId: null, overrideTtl: 14 * 24, isActive: true };
-      S.products.push(p12);
-    }
-    if (!S.boms.some(b => b.code === 'BOM-BKR-01')) {
-      const k1 = S.kitchens.find(k => k.code === 'DPR-BKR');
-      const pTepung = S.products.find(p => p.code === 'P-001') || S.products[0];
-      const pGula = S.products.find(p => p.code === 'P-002') || S.products[0];
-      const pSusu = S.products.find(p => p.code === 'P-003') || S.products[0];
-      const pMtg = S.products.find(p => p.code === 'P-004') || S.products[0];
-      if (pTepung && pGula && pSusu && pMtg) {
-        S.boms.push({
-          id: nid('boms'), code: 'BOM-BKR-01', name: 'Resep Roti Tawar Gandum (10 Loaf)', productId: p11.id, kitchenId: k1 ? k1.id : null,
-          yieldQty: 10, yieldUom: 'loaf',
-          lines: [
-            { productId: pTepung.id, qty: 4, uom: pTepung.baseUom },
-            { productId: pGula.id, qty: 0.5, uom: pGula.baseUom },
-            { productId: pSusu.id, qty: 1, uom: pSusu.baseUom },
-            { productId: pMtg.id, qty: 0.4, uom: pMtg.baseUom }
-          ],
-          instructions: 'Campur adonan, uleni hingga kalis, diamkan 45 menit, panggang 180C selama 30 menit.', isActive: true
-        });
-      }
-    }
-    if (!S.boms.some(b => b.code === 'BOM-HOT-01')) {
-      const k2 = S.kitchens.find(k => k.code === 'DPR-HOT');
-      const pDaging = S.products.find(p => p.code === 'P-007') || S.products[0];
-      const pGula = S.products.find(p => p.code === 'P-002') || S.products[0];
-      const pSaus = S.products.find(p => p.code === 'P-008') || S.products[0];
-      if (pDaging && pGula && pSaus) {
-        S.boms.push({
-          id: nid('boms'), code: 'BOM-HOT-01', name: 'Resep Patty Daging Burger (20 Pcs)', productId: p12.id, kitchenId: k2 ? k2.id : null,
-          yieldQty: 20, yieldUom: 'pcs',
-          lines: [
-            { productId: pDaging.id, qty: 2.5, uom: pDaging.baseUom },
-            { productId: pGula.id, qty: 0.1, uom: pGula.baseUom },
-            { productId: pSaus.id, qty: 1, uom: pSaus.baseUom }
-          ],
-          instructions: 'Bumbui daging cincang, aduk merata, cetak per 120gr, bekukan di blast freezer.', isActive: true
-        });
-      }
-    }
-    ch = true;
-  }
   if (!S.racks) {
     S.racks = [];
     const seen = new Set();
@@ -1590,6 +1525,7 @@ function tbl(head, rows, o = {}) {
 }
 const seg = (path, val, items) => `<div class="seg" role="group">${items.map(([v, l]) => `<button type="button" data-act="setF" data-path="${path}" data-val="${esc(v)}" aria-pressed="${String(v) === String(val)}">${esc(l)}</button>`).join('')}</div>`;
 function expCell(t, p) {
+  if (!t) return '<span class="muted">Belum diisi</span>';
   const d = daysLeft(t), thr = thrOf(p); const k = d < 0 ? 'bad' : d <= thr ? 'warn' : 'ok';
   const pct = d < 0 ? 100 : Math.max(4, Math.min(100, d / (thr * 3) * 100));
   const label = d < 0 ? `lewat ${-d} hari` : d === 0 ? 'hari ini' : `${d} hari lagi`;
@@ -1664,7 +1600,7 @@ function refresh() { M ? keepFocus(drawModal) : render(); }
 function confirmBox(title, html, okLabel, onOk, kind = 'pri') {
   const prev = M; openModal({ title, prev, body: () => html, foot: () => `<button type="button" class="btn" data-act="modalBack">Kembali</button><button type="button" class="btn ${kind}" data-act="modalOk">${esc(okLabel)}</button>`, onOk });
 }
-A.modalOk = () => M.onOk();
+A.modalOk = () => M?.onOk?.();
 A.modalBack = () => { M = M?.prev || null; drawModal(); };
 A.closeModal = () => closeModal();
 A.go = d => { if (d.page) { S.ui.page = d.page; save(); } F.notifOpen = false; document.body.classList.remove('navopen'); closeModal(); render(); window.scrollTo(0, 0); };
@@ -1676,7 +1612,7 @@ document.addEventListener('click', e => { if ((F.themeOpen || F.notifOpen) && !e
 document.addEventListener('click', e => {
   const t = e.target.closest('[data-act]'); if (!t || t.disabled) return;
   const fn = A[t.dataset.act]; if (!fn) return; e.preventDefault();
-  try { fn(t.dataset, t, e); } catch (err) { handleErr(err); }
+  try { const result = fn(t.dataset, t, e); if (result?.catch) result.catch(handleErr); } catch (err) { handleErr(err); }
 });
 function onBind(e) {
   const el = e.target; const path = el.dataset?.bind; if (!path) return;
@@ -2048,7 +1984,7 @@ A.clearProdF = d => { Object.assign(F[d.k], { c1: '', c2: '', c3: '', type: '', 
 /* ================= INBOUND ================= */
 H.inbPO = () => {
   const po = byId(S.pos, F.inb.poId);
-  if (po) { F.inb.supplierId = String(po.supplierId); F.inb.lines = po.lines.map(l => ({ productId: String(l.productId), uom: l.uom, qty: String(l.qty), cost: String(Math.round(l.price * (1 - (l.disc || 0) / 100))), batchNo: '', exp: '', rack: '' })); }
+  if (po) { F.inb.warehouseId = po.warehouseId || central()?.id; F.inb.supplierId = String(po.supplierId); F.inb.lines = po.lines.map(l => ({ productId: String(l.productId), uom: l.uom, qty: String(l.qty), cost: String(Math.round(l.price * (1 - (l.disc || 0) / 100))), batchNo: '', exp: '', rack: '' })); }
   else F.inb.lines = [blankInb()];
   F.inbErr = []; render();
 };
@@ -2060,15 +1996,16 @@ A.inbReset = () => { F.inb = { transactionDate: isoDate(Date.now()), poId: '', s
 A.inbSubmit = () => {
   const r = inboundCheck(F.inb); F.inbErr = r.errors;
   if (r.errors.length) { render(); toast(r.errors[0], 'err'); return; }
-  const go = () => { const rec = doInbound(F.inb); closeModal(); A.inbReset(); commit(`${rec.no} tersimpan, ${rec.lines.length} batch masuk Gudang Central.`); };
+  const go = () => { const rec = doInbound(F.inb); closeModal(); A.inbReset(); commit(`${rec.no} tersimpan, ${rec.lines.length} batch masuk ${W(rec.warehouseId)?.name}.`); };
   const total = r.lines.reduce((a, l) => a + (+l.qty) * (+l.cost), 0);
-  const summary = `<p>${r.lines.length} batch dari ${esc(SU(F.inb.supplierId).name)} senilai <strong>${rp(total)}</strong> akan masuk ke ${esc(central().name)}.</p>
+  const summary = `<p>${r.lines.length} batch dari ${esc(SU(F.inb.supplierId).name)} senilai <strong>${rp(total)}</strong> akan masuk ke ${esc(W(F.inb.warehouseId || central()?.id)?.name)}.</p>
    <ul class="plain">${r.lines.map(l => { const p = P(l.productId); return `<li>${esc(p.name)}: ${num(l.qty)} ${esc(l.uom)} = ${num(l.qty * uomF(p, l.uom))} ${esc(p.baseUom)}, batch ${esc(l.batchNo)}, kedaluwarsa ${fd(parseDate(l.exp))}</li>`; }).join('')}</ul>`;
   confirmBox(r.warnings.length ? 'Periksa peringatan sebelum menyimpan' : 'Simpan penerimaan', (r.warnings.length ? `<div class="alert warn">${ic('alert')}<strong>${r.warnings.length} peringatan</strong><ul>${r.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>` : '') + summary, r.warnings.length ? 'Tetap simpan' : 'Simpan penerimaan', () => { try { go(); } catch (e) { handleErr(e); } });
 };
 A.inbFromPO = d => { F.inb.poId = String(d.id); H.inbPO(); A.go({ page: 'inbound' }); };
 V.inbound = () => {
-  const c = central(), d = F.inb; const ok = can('inbound') && c && myWhIds().includes(c.id);
+  const d = F.inb; d.warehouseId ||= (myWhIds().includes(central()?.id) ? central()?.id : S.manufacturing?.settings.packingWarehouseId);
+  const c = W(d.warehouseId); const receiving = actW().filter(w => (w.isCentral || w.id === S.manufacturing?.settings.packingWarehouseId) && myWhIds().includes(w.id)); const ok = can('inbound') && receiving.length;
   const openPOs = S.pos.filter(p => p.status === 'dipesan');
   const cRacks = actR(c?.id);
   const rows = d.lines.map((l, i) => {
@@ -2084,11 +2021,12 @@ V.inbound = () => {
       <td>${d.lines.length > 1 ? `<button type="button" class="icon" data-act="inbDel" data-i="${i}" aria-label="Hapus baris ${i + 1}">×</button>` : ''}</td></tr>`;
   });
   const hist = S.inbounds.slice(0, 20).map(r => `<tr><td class="mono"><a href="#" data-act="openInbound" data-id="${r.id}">${esc(r.no)}</a></td><td>${fd(parseDate(transactionDateOf(r, 'ts')))}</td><td>${esc(SU(r.supplierId)?.name)}</td><td>${r.poId ? esc(byId(S.pos, r.poId).no) : 'Tanpa PO'}</td><td class="n">${r.lines.length}</td><td class="n">${rp(r.lines.reduce((a, l) => a + l.qtyBase * l.costBase, 0))}</td><td>${esc(r.user)}</td></tr>`);
-  return `<div class="rule">${ic('info')}<span><strong>Aturan:</strong> semua barang dari supplier masuk lewat ${esc(c ? c.name : 'Gudang Central')} untuk QC dan penagihan terpusat. Tanggal kedaluwarsa dan nomor batch wajib diisi.</span></div>
-  ${!ok ? `<div class="alert info">${ic('info')}${!can('inbound') ? `Peran ${esc(ROLES[cur().role].label)} hanya bisa melihat riwayat penerimaan.` : 'Penerimaan hanya oleh staf Gudang Central. Akun Anda bertugas di gudang lain.'}</div>` : `
+  return `<div class="rule">${ic('info')}<span><strong>Aturan:</strong> barang supplier dapat diterima di Central atau langsung ke Packing sesuai tujuan PO. Tanggal kedaluwarsa dan nomor batch wajib diisi.</span></div>
+  ${!ok ? `<div class="alert info">${ic('info')}${!can('inbound') ? `Peran ${esc(ROLES[cur().role].label)} hanya bisa melihat riwayat penerimaan.` : 'Akun Anda tidak memiliki lingkup gudang penerimaan.'}</div>` : `
   <section class="panel"><header class="ph"><h3>Terima barang</h3></header>
   <div class="formrow">
     ${fld('Tanggal transaksi', `<input type="date" data-bind="inb.transactionDate" value="${esc(d.transactionDate)}" required>`, 'Nomor RCV dibuat otomatis saat disimpan')}
+    ${fld('Gudang penerimaan', whSel('inb.warehouseId', d.warehouseId, receiving, {rr:1}))}
     ${fld('Dari purchase order', `<select data-bind="inb.poId" data-hook="inbPO">${opt('', 'Tanpa PO (manual)', d.poId)}${openPOs.map(p => opt(p.id, `${p.no}, ${SU(p.supplierId).name}`, d.poId)).join('')}</select>`, openPOs.length ? `${openPOs.length} PO menunggu barang` : 'Tidak ada PO yang menunggu barang')}
     ${fld('Supplier', `<select data-bind="inb.supplierId" ${d.poId ? 'disabled' : ''}>${opt('', 'Pilih supplier', d.supplierId)}${S.suppliers.filter(s => s.isActive).map(s => opt(s.id, s.name, d.supplierId)).join('')}</select>`)}
     ${fld('No. surat jalan supplier', `<input data-bind="inb.docRef" value="${esc(d.docRef)}" maxlength="60" placeholder="Opsional">`)}
@@ -2914,6 +2852,8 @@ V.forecast = () => {
 };
 A.fcToPO = () => { const vis = new Set(forecast(S.settings.forecastWindow).filter(r => prodMatch(r.p, F.fcf)).map(r => r.p.id)); const ids = Object.entries(F.fcSel || {}).filter(([k, v]) => v && vis.has(+k)).map(([k]) => +k); const pos = posFromForecast(ids, S.settings.forecastWindow); F.fcSel = null; F.poTab = 'aktif'; S.ui.page = 'po'; commit(`${pos.length} draft PO dibuat: ${pos.map(p => p.no).join(', ')}.`); };
 
+function poForm() { return fld('Gudang tujuan PO', whSel('po.warehouseId', F.po.warehouseId || central()?.id, actW().filter(w => w.isCentral || w.id === S.manufacturing?.settings.packingWarehouseId))) + poFormOriginal(); }
+
 /* ================= PURCHASE ORDER ================= */
 V.po = () => {
   const tab = F.poTab; const list = S.pos.filter(p => tab === 'aktif' ? ['draft', 'dipesan'].includes(p.status) : !['draft', 'dipesan'].includes(p.status)).sort((a, b) => b.createdAt - a.createdAt);
@@ -2925,14 +2865,14 @@ const lineDev = l => { const p = P(l.productId); if (!p || !p.refPrice) return 0
 const poAnom = po => po.lines.some(l => Math.abs(lineDev(l)) > S.settings.priceTolerance);
 A.newPO = d => {
   const po = d?.id ? byId(S.pos, d.id) : null;
-  F.po = po ? { id: po.id, no: po.no, transactionDate: transactionDateOf(po), supplierId: String(po.supplierId), note: po.note, lines: po.lines.map(l => ({ productId: String(l.productId), uom: l.uom, qty: String(l.qty), price: String(l.price), disc: String(l.disc || 0), src: '' })) } : { id: null, no: '', transactionDate: isoDate(Date.now()), supplierId: '', note: '', lines: [{ productId: '', uom: '', qty: '', price: '', disc: '0', src: '' }] };
+  F.po = po ? { id: po.id, warehouseId: po.warehouseId || central()?.id, no: po.no, transactionDate: transactionDateOf(po), supplierId: String(po.supplierId), note: po.note, lines: po.lines.map(l => ({ productId: String(l.productId), uom: l.uom, qty: String(l.qty), price: String(l.price), disc: String(l.disc || 0), src: '' })) } : { id: null, warehouseId: central()?.id, no: '', transactionDate: isoDate(Date.now()), supplierId: '', note: '', lines: [{ productId: '', uom: '', qty: '', price: '', disc: '0', src: '' }] };
   openModal({ title: po ? `Ubah ${po.no}` : 'Purchase order baru', wide: true, body: poForm, foot: () => `<button type="button" class="btn" data-act="closeModal">Batal</button>${btn('Simpan draft', 'poSave', {}, { k: 'pri', perm: 'po' })}` });
 };
 H.poProd = d => { const l = F.po.lines[d.i]; const p = P(l.productId); if (p) { l.uom = p.poUom; const lp = lastPrice(p.id, l.uom); l.price = String(lp.price); l.src = lp.src; if (!F.po.supplierId && p.supplierId) F.po.supplierId = String(p.supplierId); } };
 H.poUom = d => { const l = F.po.lines[d.i]; const lp = lastPrice(l.productId, l.uom); l.price = String(lp.price); l.src = lp.src; };
 A.poAdd = () => { F.po.lines.push({ productId: '', uom: '', qty: '', price: '', disc: '0', src: '' }); refresh(); };
 A.poDel = d => { F.po.lines.splice(+d.i, 1); refresh(); };
-function poForm() {
+function poFormOriginal() {
   const f = F.po; let total = 0;
   const sid = +f.supplierId; const prods = actP().slice().sort((a, b) => (b.supplierId === sid) - (a.supplierId === sid) || a.name.localeCompare(b.name));
   const rows = f.lines.map((l, i) => {
@@ -2960,7 +2900,7 @@ A.openPO = d => {
   }, foot: () => {
     const b = [];
     if (po.status === 'draft') b.push(btn('Batalkan PO', 'poCancel', { id: po.id }, { k: 'ghost-bad', perm: 'po' }), '<div class="sp"></div>', btn('Ubah', 'newPO', { id: po.id }, { perm: 'po' }), btn('Kirim ke supplier', 'poOrder', { id: po.id }, { k: 'pri', perm: 'po' }));
-    else if (po.status === 'dipesan') b.push(btn('Batalkan PO', 'poCancel', { id: po.id }, { k: 'ghost-bad', perm: 'po' }), '<div class="sp"></div>', btn('Cetak PO', 'printDoc', { kind: 'po', id: po.id }), btn('Terima di Gudang Central', 'inbFromPO', { id: po.id }, { k: 'pri', perm: 'inbound' }));
+    else if (po.status === 'dipesan') b.push(btn('Batalkan PO', 'poCancel', { id: po.id }, { k: 'ghost-bad', perm: 'po' }), '<div class="sp"></div>', btn('Cetak PO', 'printDoc', { kind: 'po', id: po.id }), btn('Terima barang', 'inbFromPO', { id: po.id }, { k: 'pri', perm: 'inbound' }));
     else b.push('<div class="sp"></div>', btn('Cetak PO', 'printDoc', { kind: 'po', id: po.id }));
     return b.join('');
   } });
@@ -3055,7 +2995,7 @@ V.warehouses = () => {
 };
 A.editWarehouse = d => {
   const w = d.id ? W(d.id) : null; F.wh = w ? { id: w.id, code: w.code, name: w.name, isCentral: w.isCentral } : { id: null, code: '', name: '', isCentral: false };
-  openModal({ title: w ? `Ubah ${w.name}` : 'Gudang baru', body: () => `<div class="formrow">${fld('Kode', `<input data-bind="wh.code" value="${esc(F.wh.code)}" maxlength="50">`)}${fld('Nama', `<input data-bind="wh.name" value="${esc(F.wh.name)}" maxlength="100">`, '', 'grow')}</div><label class="chk"><input type="checkbox" data-bind="wh.isCentral" ${F.wh.isCentral ? 'checked' : ''}> Gudang Central (satu-satunya titik penerimaan dari supplier)</label>`, foot: () => `<button type="button" class="btn" data-act="closeModal">Batal</button>${btn('Simpan', 'saveWarehouse', {}, { k: 'pri', perm: 'master' })}` });
+  openModal({ title: w ? `Ubah ${w.name}` : 'Gudang baru', body: () => `<div class="formrow">${fld('Kode', `<input data-bind="wh.code" value="${esc(F.wh.code)}" maxlength="50">`)}${fld('Nama', `<input data-bind="wh.name" value="${esc(F.wh.name)}" maxlength="100">`, '', 'grow')}</div><label class="chk"><input type="checkbox" data-bind="wh.isCentral" ${F.wh.isCentral ? 'checked' : ''}> Gudang Central (gudang utama penerimaan supplier)</label>`, foot: () => `<button type="button" class="btn" data-act="closeModal">Batal</button>${btn('Simpan', 'saveWarehouse', {}, { k: 'pri', perm: 'master' })}` });
 };
 A.saveWarehouse = () => { const w = saveWarehouse(F.wh); closeModal(); commit(`${w.name} tersimpan.`); };
 
@@ -3213,7 +3153,7 @@ function docHtml(kind, o, copy) {
     <div class="sign"><div>Disiapkan</div><div>Pengemudi</div><div>Diterima</div></div></div>`;
   }
   return `<div class="doc"><div class="wm">COPY ${copy}</div><header><div><strong>${co}</strong><span>Purchase order</span></div><div class="dno">${esc(o.no)}<span>Copy ${copy}, dicetak ${fdt(Date.now())}</span></div></header>
-  <div class="dmeta"><div><b>Kepada</b>${esc(SU(o.supplierId).name)}</div><div><b>Kirim ke</b>${esc(central()?.name || '')}</div><div><b>Tanggal transaksi</b>${fd(parseDate(transactionDateOf(o)))}</div><div><b>Status</b>${esc(PO_ST[o.status][0])}</div></div>
+  <div class="dmeta"><div><b>Kepada</b>${esc(SU(o.supplierId).name)}</div><div><b>Kirim ke</b>${esc(W(o.warehouseId || central()?.id)?.name || '')}</div><div><b>Tanggal transaksi</b>${fd(parseDate(transactionDateOf(o)))}</div><div><b>Status</b>${esc(PO_ST[o.status][0])}</div></div>
   <table><thead><tr><th>Kode</th><th>Barang</th><th class="n">Jumlah</th><th class="n">Harga</th><th class="n">Diskon</th><th class="n">Subtotal</th></tr></thead><tbody>${o.lines.map(l => { const p = P(l.productId); return `<tr><td>${esc(p.code)}</td><td>${esc(p.name)}</td><td class="n">${num(l.qty)} ${esc(l.uom)}</td><td class="n">${rp(l.price)}</td><td class="n">${l.disc ? num(l.disc) + '%' : ''}</td><td class="n">${rp(l.qty * l.price * (1 - (l.disc || 0) / 100))}</td></tr>`; }).join('')}</tbody><tfoot><tr><td colspan="5">Total</td><td class="n">${rp(poTotal(o))}</td></tr></tfoot></table>
   <div class="sign"><div>Purchasing</div><div>Disetujui</div></div></div>`;
 }
@@ -3331,17 +3271,21 @@ function load() { return false; }
 function save() { if (!ME || !S) return; dirty = true; setSync('saving'); clearTimeout(saveTimer); saveTimer = setTimeout(flush, 300 + errBackoff); }
 async function flush() {
   if (saving || !dirty) return; saving = true; dirty = false;
+  let succeeded = true;
   const aud = PENDING_AUD.splice(0); const { users, currentUserId, ui, ...data } = S;
   try { const r = await api('PUT', '/api/state', { version: VER, data, audit: aud }); VER = r.version; errBackoff = 0; setSync(dirty ? 'saving' : 'ok'); }
   catch (e) {
+    succeeded = false;
     if (e.status === 409) { dirty = false; PENDING_AUD.length = 0; await pullState(); closeModal(); render(); toast('Data baru saja diubah pengguna lain dan sudah dimuat ulang. Perubahan terakhir Anda tidak tersimpan, silakan ulangi.', 'err'); }
+    else if (e.status && e.status < 500 && e.status !== 401) { dirty = false; PENDING_AUD.length = 0; await pullState(); closeModal(); render(); handleErr(e); }
     else if (e.status !== 401) { PENDING_AUD.unshift(...aud); dirty = true; errBackoff = Math.min(15000, (errBackoff || 1000) * 2); setSync('err'); }
   } finally { saving = false; if (dirty) saveTimer = setTimeout(flush, 300 + errBackoff); }
+  return succeeded;
 }
 function setSync(s) { const el = document.getElementById('syncState'); if (el) { el.dataset.s = s; el.textContent = { ok: 'Tersimpan di server', saving: 'Menyimpan…', err: 'Gagal menyimpan, mencoba lagi…' }[s]; } }
 function emptyState() {
   seed();
-  Object.assign(S, { products: [], suppliers: [], batches: [], reservations: [], transfers: [], scraps: [], movements: [], pos: [], inbounds: [], usages: [], leadHistory: [], opnames: [], audit: [] });
+  Object.assign(S, { products: [], suppliers: [], batches: [], reservations: [], transfers: [], scraps: [], movements: [], pos: [], inbounds: [], usages: [], leadHistory: [], opnames: [], audit: [], kitchens: [], boms: [], productions: [] });
   S.warehouses = S.warehouses.filter(w => w.isCentral);
   S.racks = (S.racks || []).filter(r => r.warehouseId === 1);
 }
@@ -3435,16 +3379,16 @@ function init() {
   setInterval(async () => {
     if (!ME || !S) return;
     if (sweep()) { render(); return; }
-    if (saving || dirty || M || document.activeElement?.matches('input,select,textarea')) return;
+    if (saving || dirty || mfBusy || M || document.activeElement?.matches('input,select,textarea')) return;
     try { const v = await api('GET', '/api/state/version'); if (v.version !== VER) { await pullState(); render(); } } catch (e) { }
   }, 15000);
-  window.addEventListener('beforeunload', e => { if (dirty || saving) { e.preventDefault(); e.returnValue = ''; } });
+  window.addEventListener('beforeunload', e => { if (dirty || saving || mfBusy || mfPending()) { e.preventDefault(); e.returnValue = ''; } });
   (async () => { try { const r = await api('GET', '/api/auth/me'); ME = r.user; CFG = r.config; await afterLogin(); } catch (e) { if (e.status !== 401) showLogin(e.message); else if (!ME) showLogin(); } })();
 }
 
-init();
-
 </script>
+<script src="/static/manufacturing.js"></script>
+<script>init();</script>
 </body>
 </html>
 

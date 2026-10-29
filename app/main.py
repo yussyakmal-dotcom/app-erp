@@ -22,6 +22,8 @@ from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
+from manufacturing import (ManufacturingError, command_digest, execute as manufacturing_execute,
+                           preview as manufacturing_preview, validate_legacy_write)
 
 # ------------------------------------------------------------------ konfigurasi
 def env(name, default=None):
@@ -44,7 +46,7 @@ SESSION_HOURS = int(env("SESSION_HOURS", "12"))
 AUDIT_LOG_PATH = env("AUDIT_LOG_PATH", "/var/log/inventory/audit_log.jsonl")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 COOKIE = "inv_session"
-ROLES = {"admin", "gudang", "purchasing", "approver"}
+ROLES = {"admin", "gudang", "purchasing", "approver", "produksi", "sales", "packing", "toko"}
 
 # ------------------------------------------------------------------ database
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=3600)
@@ -195,6 +197,10 @@ def init_db():
 
 app = FastAPI(title="Inventory Management API", version="1.0-MVP", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
+@app.exception_handler(ManufacturingError)
+async def manufacturing_error_handler(request, exc):
+    return JSONResponse({"detail": str(exc)}, status_code=exc.status)
+
 @app.on_event("startup")
 def _startup():
     init_db()
@@ -341,12 +347,26 @@ def get_version(u: User = Depends(ready_user), db: Session = Depends(get_db)):
 @app.put("/api/state")
 async def put_state(request: Request, u: User = Depends(ready_user), db: Session = Depends(get_db)):
     body = await request.json()
-    base = int(body.get("version", -1))
+    if not isinstance(body, dict) or type(body.get("version")) is not int or body["version"] < 0:
+        raise HTTPException(400, "Versi state tidak valid.")
+    base = body["version"]
     data = body.get("data")
     if not isinstance(data, dict):
         raise HTTPException(400, "Data tidak valid.")
     data.pop("users", None); data.pop("currentUserId", None)
-    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    row = db.get(AppState, 1)
+    if (row.version if row else 0) != base:
+        raise HTTPException(409, "Data sudah diubah pengguna lain. Muat ulang.")
+    if body.get("reset") is True:
+        if u.role != "admin":
+            raise HTTPException(403, "Hanya Admin dapat mengatur ulang data.")
+        validate_legacy_write(None, data, user_dict(u))
+    else:
+        validate_legacy_write(json.loads(row.data) if row else None, data, user_dict(u))
+    try:
+        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Data memuat angka atau format yang tidak valid.")
     now = utcnow()
     if base == 0:
         try:
@@ -374,6 +394,60 @@ async def put_state(request: Request, u: User = Depends(ready_user), db: Session
     write_audit(entries)
     return {"version": new_version}
 
+
+# Every manufacturing command reads a fresh state and commits all its movements
+# with the same compare/swap as legacy inventory writes. A rejected command only
+# mutates a private decoded copy, so no partial consumption/output can persist.
+@app.post("/api/manufacturing/commands")
+async def manufacturing_command(request: Request, u: User = Depends(ready_user), db: Session = Depends(get_db)):
+    body = await request.json()
+    if not isinstance(body, dict) or type(body.get("version")) is not int:
+        raise HTTPException(400, "Versi state wajib diisi.")
+    key = body.get("requestId")
+    if not isinstance(key, str) or not 8 <= len(key) <= 100:
+        raise HTTPException(400, "ID permintaan wajib diisi (8–100 karakter).")
+    action, args = body.get("action"), body.get("data", {})
+    try:
+        digest = command_digest(action, args)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Payload tidak valid.")
+    row = db.get(AppState, 1)
+    if row is None:
+        raise HTTPException(400, "Inisialisasi inventori terlebih dahulu.")
+    state = json.loads(row.data)
+    previous = state.get("manufacturing", {}).get("commands", {}).get(key)
+    if previous:
+        if previous["digest"] != digest or previous["userId"] != u.id:
+            raise HTTPException(409, "ID permintaan sudah digunakan untuk tindakan berbeda.")
+        return {"version": row.version, "data": state, "result": previous["result"], "replayed": True}
+    base = body["version"]
+    if row.version != base:
+        raise HTTPException(409, "Data sudah diubah pengguna lain. Muat ulang sebelum mengulang tindakan.")
+    result, event = manufacturing_execute(state, user_dict(u), action, args)
+    state["manufacturing"]["commands"][key] = {"digest": digest, "userId": u.id, "result": result}
+    payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    res = db.execute(text("UPDATE app_state SET data=:d, version=version+1, updated_at=:t, updated_by=:u WHERE id=1 AND version=:v"),
+                     {"d": payload, "t": utcnow(), "u": u.username, "v": base})
+    if res.rowcount != 1:
+        db.rollback()
+        raise HTTPException(409, "Data sudah diubah pengguna lain. Muat ulang sebelum mengulang tindakan.")
+    db.commit()
+    event["state_version"] = base + 1
+    write_audit([event])
+    return {"version": base + 1, "data": state, "result": result, "replayed": False}
+
+
+@app.post("/api/manufacturing/preview")
+async def manufacturing_preview_route(request: Request, u: User = Depends(ready_user), db: Session = Depends(get_db)):
+    body = await request.json()
+    if not isinstance(body, dict) or not isinstance(body.get("data", {}), dict):
+        raise HTTPException(400, "Payload tidak valid.")
+    row = db.get(AppState, 1)
+    if row is None:
+        raise HTTPException(400, "Inisialisasi inventori terlebih dahulu.")
+    result = manufacturing_preview(json.loads(row.data), user_dict(u), body.get("action"), body.get("data", {}))
+    return {"version": row.version, "result": result}
+
 @app.get("/api/health")
 def health(db: Session = Depends(get_db)):
     db.execute(text("SELECT 1"))
@@ -383,3 +457,8 @@ def health(db: Session = Depends(get_db)):
 @app.get("/")
 def index():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"), headers={"Cache-Control": "no-cache"})
+
+@app.get("/static/manufacturing.js")
+def manufacturing_script():
+    return FileResponse(os.path.join(STATIC_DIR, "manufacturing.js"), media_type="application/javascript",
+                        headers={"Cache-Control": "no-cache"})

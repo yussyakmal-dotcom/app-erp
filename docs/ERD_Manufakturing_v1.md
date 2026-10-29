@@ -206,3 +206,8 @@ Setiap pengurangan memeriksa saldo sumber saat pembukuan. Dua petugas tidak bole
 - Periode proyeksi, stok dalam perjalanan/reservasi untuk saran, pembulatan alokasi, dan prioritas antarsesama SO yang kekurangan stok belum final.
 - Cara penyiapan MO perakitan dan pengaitan rinci paket dengan rencana dapur perlu dicocokkan tanpa memicu MO turunan secara otomatis.
 - Nilai contoh dan penamaan entitas tidak boleh diperlakukan sebagai data nyata atau bukti implementasi.
+
+
+## Pemetaan implementasi awal
+
+Lihat [panduan implementasi manufaktur](IMPLEMENTASI_Manufakturing_v1.md#penyimpanan-dan-integritas) untuk pemetaan entitas logis ke JSON aplikasi. Implementasi memakai `productions` untuk MO, `workOrder` di dalam MO dapur, dan objek `manufacturing` untuk rekap, permintaan, alokasi serta DO. Stok tetap memakai `batches` dan `movements` inventori; tidak dibuat saldo kedua atau migrasi ke tabel operasional baru.

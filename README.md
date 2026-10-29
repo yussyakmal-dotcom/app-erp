@@ -116,3 +116,10 @@ Ikon disematkan langsung di aplikasi (SVG), jadi tetap tampil tanpa akses intern
   mencatat siapa yang menyimpan, dan menulis audit log dengan identitas dari sesi. Untuk produksi skala besar,
   langkah berikutnya adalah memindahkan aturan ini ke endpoint server dan tabel ternormalisasi.
 
+
+
+## Modul manufaktur v2.4
+
+Modul manufaktur dan Packing tersedia pada menu **Manufaktur & Packing**. Konfigurasi dapur/BOM produk, minimum per gudang, RO/SO, rekap, MO/WO, permintaan bahan, perakitan paket, alokasi dan DO memakai stok inventori yang sama. PO kini dapat ditujukan langsung ke Packing.
+
+Baca [panduan implementasi dan pembaruan](docs/IMPLEMENTASI_Manufakturing_v1.md) untuk konfigurasi awal, perilaku kompatibilitas, pengujian, dan cara menjalankan pembaruan Docker. Tidak ada migrasi ke tabel operasional baru. Histori produksi lama dipertahankan.

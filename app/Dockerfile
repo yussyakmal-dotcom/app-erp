@@ -15,7 +15,7 @@ COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --index-url "$PIP_INDEX_URL" -r requirements.txt
 
-COPY main.py .
+COPY main.py manufacturing.py ./
 COPY static ./static
 
 RUN useradd --create-home --uid 1000 appuser \

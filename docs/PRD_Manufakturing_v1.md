@@ -242,3 +242,8 @@ Detail stok dalam perjalanan/reservasi pada saran, pembulatan alokasi, sumber RO
 - [Kit dan komponen pada DO](https://www.odoo.com/documentation/19.0/applications/inventory_and_mrp/manufacturing/advanced_configuration/kit_shipping.html)
 - [Alokasi hasil MO ke SO](https://www.odoo.com/documentation/19.0/applications/inventory_and_mrp/manufacturing/reporting/allocation.html)
 - [Stok negatif dan pergerakan stok](https://www.odoo.com/documentation/19.0/applications/inventory_and_mrp/inventory/inventory_valuation/operations_valuation.html)
+
+
+## Status implementasi awal
+
+Implementasi awal tersedia dalam aplikasi inventori. Lihat [panduan implementasi manufaktur](IMPLEMENTASI_Manufakturing_v1.md) untuk pemetaan data nyata, fitur yang dibangun, pilihan awal atas detail teknis yang sebelumnya terbuka, cara menjalankan pembaruan, serta batas pengujian. Kriteria bisnis dalam PRD ini tetap menjadi acuan uji penerimaan petugas.
